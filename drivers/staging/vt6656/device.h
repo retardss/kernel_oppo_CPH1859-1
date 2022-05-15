@@ -12,9 +12,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  *
  * File: device.h
  *
@@ -65,6 +62,8 @@
 #define RATE_AUTO	12
 
 #define MAX_RATE			12
+#define VNT_B_RATES	(BIT(RATE_1M) | BIT(RATE_2M) |\
+			BIT(RATE_5M) | BIT(RATE_11M))
 
 /*
  * device specific
@@ -86,7 +85,7 @@
 #define CONFIG_PATH			"/etc/vntconfiguration.dat"
 
 #define MAX_UINTS			8
-#define OPTION_DEFAULT			{ [0 ... MAX_UINTS-1] = -1}
+#define OPTION_DEFAULT			{ [0 ... MAX_UINTS - 1] = -1}
 
 #define DUPLICATE_RX_CACHE_LENGTH       5
 
@@ -262,8 +261,8 @@ enum {
 };
 
 /* flags for options */
-#define DEVICE_FLAGS_UNPLUG		BIT(0)
-#define DEVICE_FLAGS_DISCONNECTED	BIT(1)
+#define DEVICE_FLAGS_UNPLUG		0
+#define DEVICE_FLAGS_DISCONNECTED	1
 
 struct vnt_private {
 	/* mac80211 */
@@ -272,6 +271,7 @@ struct vnt_private {
 	u8 mac_hw;
 	/* netdev */
 	struct usb_device *usb;
+	struct usb_interface *intf;
 
 	u64 tsf_time;
 	u8 rx_rate;

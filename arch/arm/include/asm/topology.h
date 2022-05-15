@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_ARM_TOPOLOGY_H
 #define _ASM_ARM_TOPOLOGY_H
 
@@ -30,15 +31,19 @@ void init_cpu_topology(void);
 void store_cpu_topology(unsigned int cpuid);
 const struct cpumask *cpu_coregroup_mask(int cpu);
 
-/* Extras of CPU & Cluster functions */
-extern int arch_cpu_is_big(unsigned int cpu);
-extern int arch_cpu_is_little(unsigned int cpu);
-extern int arch_is_multi_cluster(void);
-extern int arch_is_smp(void);
-extern int arch_get_nr_clusters(void);
-extern int arch_get_cluster_id(unsigned int cpu);
-extern void arch_get_cluster_cpus(struct cpumask *cpus, int cluster_id);
-extern int arch_better_capacity(unsigned int cpu);
+#include <linux/arch_topology.h>
+
+/* Replace task scheduler's default frequency-invariant accounting */
+#define arch_scale_freq_capacity topology_get_freq_scale
+
+/* Replace task scheduler's default max-frequency-invariant accounting */
+#define arch_scale_max_freq_capacity topology_get_max_freq_scale
+
+/* Replace task scheduler's default cpu-invariant accounting */
+#define arch_scale_cpu_capacity topology_get_cpu_scale
+
+/* Enable topology flag updates */
+#define arch_update_cpu_topology topology_update_cpu_topology
 
 #else
 

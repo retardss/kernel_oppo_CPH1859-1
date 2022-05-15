@@ -75,8 +75,8 @@ static ssize_t vexpress_reset_active_store(struct device *dev,
 	return err ? err : count;
 }
 
-DEVICE_ATTR(active, S_IRUGO | S_IWUSR, vexpress_reset_active_show,
-		vexpress_reset_active_store);
+static DEVICE_ATTR(active, S_IRUGO | S_IWUSR, vexpress_reset_active_show,
+		   vexpress_reset_active_store);
 
 
 enum vexpress_reset_func { FUNC_RESET, FUNC_SHUTDOWN, FUNC_REBOOT };
@@ -150,6 +150,7 @@ static struct platform_driver vexpress_reset_driver = {
 	.driver = {
 		.name = "vexpress-reset",
 		.of_match_table = vexpress_reset_of_match,
+		.suppress_bind_attrs = true,
 	},
 };
 

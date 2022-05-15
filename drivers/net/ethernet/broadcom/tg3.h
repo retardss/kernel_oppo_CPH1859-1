@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* $Id: tg3.h,v 1.37.2.32 2002/03/11 12:18:18 davem Exp $
  * tg3.h: Definitions for Broadcom Tigon3 ethernet driver.
  *
@@ -3258,7 +3259,6 @@ struct tg3 {
 	int				pcie_readrq;
 
 	struct mii_bus			*mdio_bus;
-	int				mdio_irq[PHY_MAX_ADDR];
 	int				old_link;
 
 	u8				phy_addr;

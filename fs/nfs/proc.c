@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/nfs/proc.c
  *
@@ -145,7 +146,7 @@ nfs_proc_setattr(struct dentry *dentry, struct nfs_fattr *fattr,
 }
 
 static int
-nfs_proc_lookup(struct inode *dir, struct qstr *name,
+nfs_proc_lookup(struct inode *dir, const struct qstr *name,
 		struct nfs_fh *fhandle, struct nfs_fattr *fattr,
 		struct nfs4_label *label)
 {
@@ -299,7 +300,7 @@ out:
 }
   
 static int
-nfs_proc_remove(struct inode *dir, struct qstr *name)
+nfs_proc_remove(struct inode *dir, const struct qstr *name)
 {
 	struct nfs_removeargs arg = {
 		.fh = NFS_FH(dir),
@@ -357,7 +358,7 @@ nfs_proc_rename_done(struct rpc_task *task, struct inode *old_dir,
 }
 
 static int
-nfs_proc_link(struct inode *inode, struct inode *dir, struct qstr *name)
+nfs_proc_link(struct inode *inode, struct inode *dir, const struct qstr *name)
 {
 	struct nfs_linkargs	arg = {
 		.fromfh		= NFS_FH(inode),
@@ -456,7 +457,7 @@ out:
 }
 
 static int
-nfs_proc_rmdir(struct inode *dir, struct qstr *name)
+nfs_proc_rmdir(struct inode *dir, const struct qstr *name)
 {
 	struct nfs_diropargs	arg = {
 		.fh		= NFS_FH(dir),
@@ -485,7 +486,7 @@ nfs_proc_rmdir(struct inode *dir, struct qstr *name)
  */
 static int
 nfs_proc_readdir(struct dentry *dentry, struct rpc_cred *cred,
-		 u64 cookie, struct page **pages, unsigned int count, int plus)
+		 u64 cookie, struct page **pages, unsigned int count, bool plus)
 {
 	struct inode		*dir = d_inode(dentry);
 	struct nfs_readdirargs	arg = {
@@ -588,7 +589,8 @@ static int nfs_read_done(struct rpc_task *task, struct nfs_pgio_header *hdr)
 		/* Emulate the eof flag, which isn't normally needed in NFSv2
 		 * as it is guaranteed to always return the file attributes
 		 */
-		if (hdr->args.offset + hdr->res.count >= hdr->res.fattr->size)
+		if ((hdr->res.count == 0 && hdr->args.count > 0) ||
+		    hdr->args.offset + hdr->res.count >= hdr->res.fattr->size)
 			hdr->res.eof = 1;
 	}
 	return 0;
@@ -609,8 +611,10 @@ static int nfs_proc_pgio_rpc_prepare(struct rpc_task *task,
 
 static int nfs_write_done(struct rpc_task *task, struct nfs_pgio_header *hdr)
 {
-	if (task->tk_status >= 0)
+	if (task->tk_status >= 0) {
+		hdr->res.count = hdr->args.count;
 		nfs_writeback_update_inode(hdr);
+	}
 	return 0;
 }
 
@@ -638,7 +642,7 @@ nfs_proc_lock(struct file *filp, int cmd, struct file_lock *fl)
 {
 	struct inode *inode = file_inode(filp);
 
-	return nlmclnt_proc(NFS_SERVER(inode)->nlm_host, cmd, fl);
+	return nlmclnt_proc(NFS_SERVER(inode)->nlm_host, cmd, fl, NULL);
 }
 
 /* Helper functions for NFS lock bounds checking */

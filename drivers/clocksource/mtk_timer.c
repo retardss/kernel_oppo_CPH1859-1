@@ -148,8 +148,7 @@ static irqreturn_t mtk_timer_interrupt(int irq, void *dev_id)
 }
 
 static void
-__init mtk_timer_setup(struct mtk_clock_event_device *evt, u8 timer,
-			    u8 option, u8 clk_src, bool enable)
+__init mtk_timer_setup(struct mtk_clock_event_device *evt, u8 timer, u8 option)
 {
 	u32 val;
 
@@ -182,23 +181,7 @@ static void mtk_timer_enable_irq(struct mtk_clock_event_device *evt, u8 timer)
 			evt->gpt_base + GPT_IRQ_EN_REG);
 }
 
-u64 mtk_timer_get_cnt(u8 timer)
-{
-	u32 val[2];
-	u64 cnt;
-
-	val[0] = readl(mtk_evt->gpt_base + TIMER_CNT_REG(timer));
-	if (timer == 6) {
-		val[1] = readl(mtk_evt->gpt_base + TIMER_CNT_REG_H(timer));
-		cnt = (((u64)val[1]<<32) | (u64)val[0]);
-		return cnt;
-	}
-
-	cnt = ((u64)val[0])&0x00000000FFFFFFFF;
-	return cnt;
-}
-
-static void __init mtk_timer_init(struct device_node *node)
+static int __init mtk_timer_init(struct device_node *node)
 {
 	struct mtk_clock_event_device *evt;
 	struct resource res;
@@ -208,7 +191,7 @@ static void __init mtk_timer_init(struct device_node *node)
 
 	evt = kzalloc(sizeof(*evt), GFP_KERNEL);
 	if (!evt)
-		return;
+		return -ENOMEM;
 
 	evt->dev.name = "mtk_tick";
 	evt->dev.rating = 300;
@@ -232,38 +215,21 @@ static void __init mtk_timer_init(struct device_node *node)
 		goto err_mem;
 	}
 
-	clk_bus = of_clk_get_by_name(node, "bus");
-	if (!IS_ERR(clk_bus))
-		clk_prepare_enable(clk_bus);
-
-	clk_src = of_clk_get(node, 0);
-	if (IS_ERR(clk_src)) {
-		pr_err("Can't get timer clock_src\n");
+	clk = of_clk_get(node, 0);
+	if (IS_ERR(clk)) {
+		pr_err("Can't get timer clock\n");
 		goto err_irq;
 	}
 
-	if (clk_prepare_enable(clk_src)) {
-		pr_err("Can't prepare clock_src\n");
-		goto err_clk_put_src;
-	}
-	rate_src = clk_get_rate(clk_src);
-
-	clk_evt = of_clk_get_by_name(node, "clk32k");
-	if (!IS_ERR(clk_evt)) {
-		clk32k_exist = true;
-		clk_prepare_enable(clk_evt);
-		rate_evt = clk_get_rate(clk_evt);
-	} else {
-		rate_evt = rate_src;
+	if (clk_prepare_enable(clk)) {
+		pr_err("Can't prepare clock\n");
+		goto err_clk_put;
 	}
 
 	if (request_irq(evt->dev.irq, mtk_timer_interrupt,
 			IRQF_TIMER | IRQF_IRQPOLL, "mtk_timer", evt)) {
 		pr_err("failed to setup irq %d\n", evt->dev.irq);
-		if (clk32k_exist)
-			goto err_clk_disable_evt;
-		else
-			goto err_clk_disable_src;
+		goto err_clk_disable;
 	}
 
 	evt->ticks_per_jiffy = DIV_ROUND_UP(rate_evt, HZ);
@@ -285,7 +251,7 @@ static void __init mtk_timer_init(struct device_node *node)
 
 	mtk_timer_enable_irq(evt, GPT_CLK_EVT);
 
-	return;
+	return 0;
 
 err_clk_disable_evt:
 	clk_disable_unprepare(clk_evt);
@@ -305,5 +271,7 @@ err_mem:
 	release_mem_region(res.start, resource_size(&res));
 err_kzalloc:
 	kfree(evt);
+
+	return -EINVAL;
 }
-CLOCKSOURCE_OF_DECLARE(mtk_mt6577, "mediatek,mt6577-timer", mtk_timer_init);
+TIMER_OF_DECLARE(mtk_mt6577, "mediatek,mt6577-timer", mtk_timer_init);

@@ -605,8 +605,8 @@ static int mv5_scr_write(struct ata_link *link, unsigned int sc_reg_in, u32 val)
 static int mv_port_start(struct ata_port *ap);
 static void mv_port_stop(struct ata_port *ap);
 static int mv_qc_defer(struct ata_queued_cmd *qc);
-static void mv_qc_prep(struct ata_queued_cmd *qc);
-static void mv_qc_prep_iie(struct ata_queued_cmd *qc);
+static enum ata_completion_errors mv_qc_prep(struct ata_queued_cmd *qc);
+static enum ata_completion_errors mv_qc_prep_iie(struct ata_queued_cmd *qc);
 static unsigned int mv_qc_issue(struct ata_queued_cmd *qc);
 static int mv_hardreset(struct ata_link *link, unsigned int *class,
 			unsigned long deadline);
@@ -986,7 +986,7 @@ static inline void mv_write_cached_reg(void __iomem *addr, u32 *old, u32 new)
 		 * Looks like a lot of fuss, but it avoids an unnecessary
 		 * +1 usec read-after-write delay for unaffected registers.
 		 */
-		laddr = (long)addr & 0xffff;
+		laddr = (unsigned long)addr & 0xffff;
 		if (laddr >= 0x300 && laddr <= 0x33c) {
 			laddr &= 0x000f;
 			if (laddr == 0x4 || laddr == 0xc) {
@@ -1727,15 +1727,13 @@ static int mv_port_start(struct ata_port *ap)
 		return -ENOMEM;
 	ap->private_data = pp;
 
-	pp->crqb = dma_pool_alloc(hpriv->crqb_pool, GFP_KERNEL, &pp->crqb_dma);
+	pp->crqb = dma_pool_zalloc(hpriv->crqb_pool, GFP_KERNEL, &pp->crqb_dma);
 	if (!pp->crqb)
 		return -ENOMEM;
-	memset(pp->crqb, 0, MV_CRQB_Q_SZ);
 
-	pp->crpb = dma_pool_alloc(hpriv->crpb_pool, GFP_KERNEL, &pp->crpb_dma);
+	pp->crpb = dma_pool_zalloc(hpriv->crpb_pool, GFP_KERNEL, &pp->crpb_dma);
 	if (!pp->crpb)
 		goto out_port_free_dma_mem;
-	memset(pp->crpb, 0, MV_CRPB_Q_SZ);
 
 	/* 6041/6081 Rev. "C0" (and newer) are okay with async notify */
 	if (hpriv->hp_flags & MV_HP_ERRATA_60X1C0)
@@ -2046,7 +2044,7 @@ static void mv_rw_multi_errata_sata24(struct ata_queued_cmd *qc)
  *      LOCKING:
  *      Inherited from caller.
  */
-static void mv_qc_prep(struct ata_queued_cmd *qc)
+static enum ata_completion_errors mv_qc_prep(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = qc->ap;
 	struct mv_port_priv *pp = ap->private_data;
@@ -2058,15 +2056,15 @@ static void mv_qc_prep(struct ata_queued_cmd *qc)
 	switch (tf->protocol) {
 	case ATA_PROT_DMA:
 		if (tf->command == ATA_CMD_DSM)
-			return;
+			return AC_ERR_OK;
 		/* fall-thru */
 	case ATA_PROT_NCQ:
 		break;	/* continue below */
 	case ATA_PROT_PIO:
 		mv_rw_multi_errata_sata24(qc);
-		return;
+		return AC_ERR_OK;
 	default:
-		return;
+		return AC_ERR_OK;
 	}
 
 	/* Fill in command request block
@@ -2113,12 +2111,10 @@ static void mv_qc_prep(struct ata_queued_cmd *qc)
 		 * non-NCQ mode are: [RW] STREAM DMA and W DMA FUA EXT, none
 		 * of which are defined/used by Linux.  If we get here, this
 		 * driver needs work.
-		 *
-		 * FIXME: modify libata to give qc_prep a return value and
-		 * return error here.
 		 */
-		BUG_ON(tf->command);
-		break;
+		ata_port_err(ap, "%s: unsupported command: %.2x\n", __func__,
+				tf->command);
+		return AC_ERR_INVALID;
 	}
 	mv_crqb_pack_cmd(cw++, tf->nsect, ATA_REG_NSECT, 0);
 	mv_crqb_pack_cmd(cw++, tf->hob_lbal, ATA_REG_LBAL, 0);
@@ -2131,8 +2127,10 @@ static void mv_qc_prep(struct ata_queued_cmd *qc)
 	mv_crqb_pack_cmd(cw++, tf->command, ATA_REG_CMD, 1);	/* last */
 
 	if (!(qc->flags & ATA_QCFLAG_DMAMAP))
-		return;
+		return AC_ERR_OK;
 	mv_fill_sg(qc);
+
+	return AC_ERR_OK;
 }
 
 /**
@@ -2147,7 +2145,7 @@ static void mv_qc_prep(struct ata_queued_cmd *qc)
  *      LOCKING:
  *      Inherited from caller.
  */
-static void mv_qc_prep_iie(struct ata_queued_cmd *qc)
+static enum ata_completion_errors mv_qc_prep_iie(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = qc->ap;
 	struct mv_port_priv *pp = ap->private_data;
@@ -2158,9 +2156,9 @@ static void mv_qc_prep_iie(struct ata_queued_cmd *qc)
 
 	if ((tf->protocol != ATA_PROT_DMA) &&
 	    (tf->protocol != ATA_PROT_NCQ))
-		return;
+		return AC_ERR_OK;
 	if (tf->command == ATA_CMD_DSM)
-		return;  /* use bmdma for this */
+		return AC_ERR_OK;  /* use bmdma for this */
 
 	/* Fill in Gen IIE command request block */
 	if (!(tf->flags & ATA_TFLAG_WRITE))
@@ -2201,8 +2199,10 @@ static void mv_qc_prep_iie(struct ata_queued_cmd *qc)
 		);
 
 	if (!(qc->flags & ATA_QCFLAG_DMAMAP))
-		return;
+		return AC_ERR_OK;
 	mv_fill_sg(qc);
+
+	return AC_ERR_OK;
 }
 
 /**
@@ -4092,7 +4092,20 @@ static int mv_platform_probe(struct platform_device *pdev)
 
 	/* allocate host */
 	if (pdev->dev.of_node) {
-		of_property_read_u32(pdev->dev.of_node, "nr-ports", &n_ports);
+		rc = of_property_read_u32(pdev->dev.of_node, "nr-ports",
+					   &n_ports);
+		if (rc) {
+			dev_err(&pdev->dev,
+				"error parsing nr-ports property: %d\n", rc);
+			return rc;
+		}
+
+		if (n_ports <= 0) {
+			dev_err(&pdev->dev, "nr-ports must be positive: %d\n",
+				n_ports);
+			return -EINVAL;
+		}
+
 		irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
 	} else {
 		mv_platform_data = dev_get_platdata(&pdev->dev);
@@ -4278,7 +4291,7 @@ static int mv_platform_resume(struct platform_device *pdev)
 #endif
 
 #ifdef CONFIG_OF
-static struct of_device_id mv_sata_dt_ids[] = {
+static const struct of_device_id mv_sata_dt_ids[] = {
 	{ .compatible = "marvell,armada-370-sata", },
 	{ .compatible = "marvell,orion-sata", },
 	{},
@@ -4518,7 +4531,7 @@ static void __exit mv_exit(void)
 
 MODULE_AUTHOR("Brett Russ");
 MODULE_DESCRIPTION("SCSI low-level driver for Marvell SATA controllers");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_DEVICE_TABLE(pci, mv_pci_tbl);
 MODULE_VERSION(DRV_VERSION);
 MODULE_ALIAS("platform:" DRV_NAME);

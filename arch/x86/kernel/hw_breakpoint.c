@@ -36,13 +36,14 @@
 #include <linux/percpu.h>
 #include <linux/kdebug.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/sched.h>
 #include <linux/smp.h>
 
 #include <asm/hw_breakpoint.h>
 #include <asm/processor.h>
 #include <asm/debugreg.h>
+#include <asm/user.h>
 
 /* Per cpu debug control register value */
 DEFINE_PER_CPU(unsigned long, cpu_dr7);
@@ -351,6 +352,7 @@ int arch_validate_hwbkpt_settings(struct perf_event *bp)
 #endif
 	default:
 		WARN_ON_ONCE(1);
+		return -EINVAL;
 	}
 
 	/*

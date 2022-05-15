@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * fscrypt.h: declarations for per-file encryption
  *
@@ -18,6 +19,11 @@
 #define FS_CRYPTO_BLOCK_SIZE		16
 
 struct fscrypt_ctx;
+
+/* iv sector for security/pfe/pfk_fscrypt.c and f2fs */
+#define PG_DUN(i, p)                                            \
+	(((((u64)(i)->i_ino) & 0xffffffff) << 32) | ((p)->index & 0xffffffff))
+
 struct fscrypt_info;
 
 struct fscrypt_str {
@@ -37,6 +43,9 @@ struct fscrypt_name {
 #define FSTR_TO_QSTR(f)		QSTR_INIT((f)->name, (f)->len)
 #define fname_name(p)		((p)->disk_name.name)
 #define fname_len(p)		((p)->disk_name.len)
+
+/* Maximum value for the third parameter of fscrypt_operations.set_context(). */
+#define FSCRYPT_SET_CONTEXT_MAX_SIZE	28
 
 #if __FS_HAS_ENCRYPTION
 #include <linux/fscrypt_supp.h>
@@ -85,7 +94,7 @@ static inline int fscrypt_require_key(struct inode *inode)
  * in an encrypted directory tree use the same encryption policy.
  *
  * Return: 0 on success, -ENOKEY if the directory's encryption key is missing,
- * -EPERM if the link would result in an inconsistent encryption policy, or
+ * -EXDEV if the link would result in an inconsistent encryption policy, or
  * another -errno code.
  */
 static inline int fscrypt_prepare_link(struct dentry *old_dentry,
@@ -115,7 +124,7 @@ static inline int fscrypt_prepare_link(struct dentry *old_dentry,
  * We also verify that the rename will not violate the constraint that all files
  * in an encrypted directory tree use the same encryption policy.
  *
- * Return: 0 on success, -ENOKEY if an encryption key is missing, -EPERM if the
+ * Return: 0 on success, -ENOKEY if an encryption key is missing, -EXDEV if the
  * rename would cause inconsistent encryption policies, or another -errno code.
  */
 static inline int fscrypt_prepare_rename(struct inode *old_dir,
@@ -247,4 +256,30 @@ static inline int fscrypt_encrypt_symlink(struct inode *inode,
 	return 0;
 }
 
+/* fscrypt_ice.c */
+#ifdef CONFIG_PFK
+extern int fscrypt_using_hardware_encryption(const struct inode *inode);
+extern void fscrypt_set_ice_dun(const struct inode *inode,
+		struct bio *bio, u64 dun);
+extern void fscrypt_set_ice_skip(struct bio *bio, int bi_crypt_skip);
+extern bool fscrypt_mergeable_bio(struct bio *bio, u64 dun, bool bio_encrypted,
+		int bi_crypt_skip);
+#else
+static inline int fscrypt_using_hardware_encryption(const struct inode *inode)
+{
+	return 0;
+}
+
+static inline void fscrypt_set_ice_dun(const struct inode *inode,
+		struct bio *bio, u64 dun){}
+
+static inline void fscrypt_set_ice_skip(struct bio *bio, int bi_crypt_skip)
+{}
+
+static inline bool fscrypt_mergeable_bio(struct bio *bio,
+		u64 dun, bool bio_encrypted, int bi_crypt_skip)
+{
+	return true;
+}
+#endif
 #endif	/* _LINUX_FSCRYPT_H */

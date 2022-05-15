@@ -28,7 +28,7 @@
 
 #include <asm/fw/fw.h>
 #include <asm/mach-malta/malta-dtshim.h>
-#include <asm/mips-cm.h>
+#include <asm/mips-cps.h>
 #include <asm/mips-boards/generic.h>
 #include <asm/mips-boards/malta.h>
 #include <asm/mips-boards/maltaint.h>
@@ -41,9 +41,6 @@
 
 #define ROCIT_CONFIG_GEN0		0x1f403000
 #define  ROCIT_CONFIG_GEN0_PCI_IOCU	BIT(7)
-
-extern void malta_be_init(void);
-extern int malta_be_handler(struct pt_regs *regs, int is_fixup);
 
 static struct resource standard_io_resources[] = {
 	{
@@ -131,7 +128,7 @@ static int __init plat_enable_iocoherency(void)
 				 BONITO_PCIMEMBASECFG_MEMBASE1_CACHED);
 			pr_info("Enabled Bonito IOBC coherency\n");
 		}
-	} else if (mips_cm_numiocu() != 0) {
+	} else if (mips_cps_numiocu(0) != 0) {
 		/* Nothing special needs to be done to enable coherency */
 		pr_info("CMP IOCU detected\n");
 		cfg = __raw_readl((u32 *)CKSEG1ADDR(ROCIT_CONFIG_GEN0));
@@ -254,15 +251,20 @@ static void __init bonito_quirks_setup(void)
 #endif
 }
 
+void __init *plat_get_fdt(void)
+{
+	return (void *)__dtb_start;
+}
+
 void __init plat_mem_setup(void)
 {
 	unsigned int i;
-	void *fdt = __dtb_start;
+	void *fdt = plat_get_fdt();
 
 	fdt = malta_dt_shim(fdt);
 	__dt_setup_arch(fdt);
 
-	if (config_enabled(CONFIG_EVA))
+	if (IS_ENABLED(CONFIG_EVA))
 		/* EVA has already been configured in mach-malta/kernel-init.h */
 		pr_info("Enhanced Virtual Addressing (EVA) activated\n");
 
@@ -296,7 +298,4 @@ void __init plat_mem_setup(void)
 #if defined(CONFIG_VT) && defined(CONFIG_VGA_CONSOLE)
 	screen_info_setup();
 #endif
-
-	board_be_init = malta_be_init;
-	board_be_handler = malta_be_handler;
 }

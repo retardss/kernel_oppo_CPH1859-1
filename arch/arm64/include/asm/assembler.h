@@ -25,23 +25,11 @@
 
 #include <asm/asm-offsets.h>
 #include <asm/cpufeature.h>
+#include <asm/cputype.h>
 #include <asm/page.h>
 #include <asm/pgtable-hwdef.h>
-#include <asm/cputype.h>
 #include <asm/ptrace.h>
 #include <asm/thread_info.h>
-
-/*
- * Stack pushing/popping (register pairs only). Equivalent to store decrement
- * before, load increment after.
- */
-	.macro	push, xreg1, xreg2
-	stp	\xreg1, \xreg2, [sp, #-16]!
-	.endm
-
-	.macro	pop, xreg1, xreg2
-	ldp	\xreg1, \xreg2, [sp], #16
-	.endm
 
 /*
  * Enable and disable interrupts.
@@ -61,6 +49,18 @@
 
 	.macro	restore_irq, flags
 	msr	daif, \flags
+	.endm
+
+/*
+ * Save/disable and restore interrupts.
+ */
+	.macro	save_and_disable_irqs, olddaif
+	mrs	\olddaif, daif
+	disable_irq
+	.endm
+
+	.macro	restore_irqs, olddaif
+	msr	daif, \olddaif
 	.endm
 
 /*
@@ -106,6 +106,24 @@
  */
 	.macro	smp_dmb, opt
 	dmb	\opt
+	.endm
+
+/*
+ * Value prediction barrier
+ */
+	.macro	csdb
+	hint	#20
+	.endm
+
+/*
+ * Sanitise a 64-bit bounded index wrt speculation, returning zero if out
+ * of bounds.
+ */
+	.macro	mask_nospec64, idx, limit, tmp
+	sub	\tmp, \idx, \limit
+	bic	\tmp, \tmp, \idx
+	and	\idx, \idx, \tmp, asr #63
+	csdb
 	.endm
 
 /*
@@ -177,22 +195,25 @@ lr	.req	x30		// link register
 
 /*
  * Pseudo-ops for PC-relative adr/ldr/str <reg>, <symbol> where
- * <symbol> is within the range +/- 4 GB of the PC.
+ * <symbol> is within the range +/- 4 GB of the PC when running
+ * in core kernel context. In module context, a movz/movk sequence
+ * is used, since modules may be loaded far away from the kernel
+ * when KASLR is in effect.
  */
 	/*
 	 * @dst: destination register (64 bit wide)
 	 * @sym: name of the symbol
-	 * @tmp: optional scratch register to be used if <dst> == sp, which
-	 *       is not allowed in an adrp instruction
 	 */
-	.macro	adr_l, dst, sym, tmp=
-	.ifb	\tmp
+	.macro	adr_l, dst, sym
+#ifndef MODULE
 	adrp	\dst, \sym
 	add	\dst, \dst, :lo12:\sym
-	.else
-	adrp	\tmp, \sym
-	add	\dst, \tmp, :lo12:\sym
-	.endif
+#else
+	movz	\dst, #:abs_g3:\sym
+	movk	\dst, #:abs_g2_nc:\sym
+	movk	\dst, #:abs_g1_nc:\sym
+	movk	\dst, #:abs_g0_nc:\sym
+#endif
 	.endm
 
 	/*
@@ -203,6 +224,7 @@ lr	.req	x30		// link register
 	 *       the address
 	 */
 	.macro	ldr_l, dst, sym, tmp=
+#ifndef MODULE
 	.ifb	\tmp
 	adrp	\dst, \sym
 	ldr	\dst, [\dst, :lo12:\sym]
@@ -210,6 +232,15 @@ lr	.req	x30		// link register
 	adrp	\tmp, \sym
 	ldr	\dst, [\tmp, :lo12:\sym]
 	.endif
+#else
+	.ifb	\tmp
+	adr_l	\dst, \sym
+	ldr	\dst, [\dst]
+	.else
+	adr_l	\tmp, \sym
+	ldr	\dst, [\tmp]
+	.endif
+#endif
 	.endm
 
 	/*
@@ -219,8 +250,202 @@ lr	.req	x30		// link register
 	 *       while <src> needs to be preserved.
 	 */
 	.macro	str_l, src, sym, tmp
+#ifndef MODULE
 	adrp	\tmp, \sym
 	str	\src, [\tmp, :lo12:\sym]
+#else
+	adr_l	\tmp, \sym
+	str	\src, [\tmp]
+#endif
+	.endm
+
+	/*
+	 * @dst: Result of per_cpu(sym, smp_processor_id()), can be SP for
+	 *       non-module code
+	 * @sym: The name of the per-cpu variable
+	 * @tmp: scratch register
+	 */
+	.macro adr_this_cpu, dst, sym, tmp
+#ifndef MODULE
+	adrp	\tmp, \sym
+	add	\dst, \tmp, #:lo12:\sym
+#else
+	adr_l	\dst, \sym
+#endif
+alternative_if_not ARM64_HAS_VIRT_HOST_EXTN
+	mrs	\tmp, tpidr_el1
+alternative_else
+	mrs	\tmp, tpidr_el2
+alternative_endif
+	add	\dst, \dst, \tmp
+	.endm
+
+	/*
+	 * @dst: Result of READ_ONCE(per_cpu(sym, smp_processor_id()))
+	 * @sym: The name of the per-cpu variable
+	 * @tmp: scratch register
+	 */
+	.macro ldr_this_cpu dst, sym, tmp
+	adr_l	\dst, \sym
+alternative_if_not ARM64_HAS_VIRT_HOST_EXTN
+	mrs	\tmp, tpidr_el1
+alternative_else
+	mrs	\tmp, tpidr_el2
+alternative_endif
+	ldr	\dst, [\dst, \tmp]
+	.endm
+
+/*
+ * vma_vm_mm - get mm pointer from vma pointer (vma->vm_mm)
+ */
+	.macro	vma_vm_mm, rd, rn
+	ldr	\rd, [\rn, #VMA_VM_MM]
+	.endm
+
+/*
+ * mmid - get context id from mm pointer (mm->context.id)
+ */
+	.macro	mmid, rd, rn
+	ldr	\rd, [\rn, #MM_CONTEXT_ID]
+	.endm
+/*
+ * read_ctr - read CTR_EL0. If the system has mismatched
+ * cache line sizes, provide the system wide safe value
+ * from arm64_ftr_reg_ctrel0.sys_val
+ */
+	.macro	read_ctr, reg
+alternative_if_not ARM64_MISMATCHED_CACHE_LINE_SIZE
+	mrs	\reg, ctr_el0			// read CTR
+	nop
+alternative_else
+	ldr_l	\reg, arm64_ftr_reg_ctrel0 + ARM64_FTR_SYSVAL
+alternative_endif
+	.endm
+
+
+/*
+ * raw_dcache_line_size - get the minimum D-cache line size on this CPU
+ * from the CTR register.
+ */
+	.macro	raw_dcache_line_size, reg, tmp
+	mrs	\tmp, ctr_el0			// read CTR
+	ubfm	\tmp, \tmp, #16, #19		// cache line size encoding
+	mov	\reg, #4			// bytes per word
+	lsl	\reg, \reg, \tmp		// actual cache line size
+	.endm
+
+/*
+ * dcache_line_size - get the safe D-cache line size across all CPUs
+ */
+	.macro	dcache_line_size, reg, tmp
+	read_ctr	\tmp
+	ubfm		\tmp, \tmp, #16, #19	// cache line size encoding
+	mov		\reg, #4		// bytes per word
+	lsl		\reg, \reg, \tmp	// actual cache line size
+	.endm
+
+/*
+ * raw_icache_line_size - get the minimum I-cache line size on this CPU
+ * from the CTR register.
+ */
+	.macro	raw_icache_line_size, reg, tmp
+	mrs	\tmp, ctr_el0			// read CTR
+	and	\tmp, \tmp, #0xf		// cache line size encoding
+	mov	\reg, #4			// bytes per word
+	lsl	\reg, \reg, \tmp		// actual cache line size
+	.endm
+
+/*
+ * icache_line_size - get the safe I-cache line size across all CPUs
+ */
+	.macro	icache_line_size, reg, tmp
+	read_ctr	\tmp
+	and		\tmp, \tmp, #0xf	// cache line size encoding
+	mov		\reg, #4		// bytes per word
+	lsl		\reg, \reg, \tmp	// actual cache line size
+	.endm
+
+/*
+ * tcr_set_idmap_t0sz - update TCR.T0SZ so that we can load the ID map
+ */
+	.macro	tcr_set_idmap_t0sz, valreg, tmpreg
+#ifndef CONFIG_ARM64_VA_BITS_48
+	ldr_l	\tmpreg, idmap_t0sz
+	bfi	\valreg, \tmpreg, #TCR_T0SZ_OFFSET, #TCR_TxSZ_WIDTH
+#endif
+	.endm
+
+/*
+ * Macro to perform a data cache maintenance for the interval
+ * [kaddr, kaddr + size)
+ *
+ * 	op:		operation passed to dc instruction
+ * 	domain:		domain used in dsb instruciton
+ * 	kaddr:		starting virtual address of the region
+ * 	size:		size of the region
+ * 	Corrupts:	kaddr, size, tmp1, tmp2
+ */
+	.macro __dcache_op_workaround_clean_cache, op, kaddr
+alternative_if_not ARM64_WORKAROUND_CLEAN_CACHE
+	dc	\op, \kaddr
+alternative_else
+	dc	civac, \kaddr
+alternative_endif
+	.endm
+
+	.macro dcache_by_line_op op, domain, kaddr, size, tmp1, tmp2
+	dcache_line_size \tmp1, \tmp2
+	add	\size, \kaddr, \size
+	sub	\tmp2, \tmp1, #1
+	bic	\kaddr, \kaddr, \tmp2
+9998:
+	.ifc	\op, cvau
+	__dcache_op_workaround_clean_cache \op, \kaddr
+	.else
+	.ifc	\op, cvac
+	__dcache_op_workaround_clean_cache \op, \kaddr
+	.else
+	.ifc	\op, cvap
+	sys	3, c7, c12, 1, \kaddr	// dc cvap
+	.else
+	dc	\op, \kaddr
+	.endif
+	.endif
+	.endif
+	add	\kaddr, \kaddr, \tmp1
+	cmp	\kaddr, \size
+	b.lo	9998b
+	dsb	\domain
+	.endm
+
+/*
+ * reset_pmuserenr_el0 - reset PMUSERENR_EL0 if PMUv3 present
+ */
+	.macro	reset_pmuserenr_el0, tmpreg
+	mrs	\tmpreg, id_aa64dfr0_el1	// Check ID_AA64DFR0_EL1 PMUVer
+	sbfx	\tmpreg, \tmpreg, #8, #4
+	cmp	\tmpreg, #1			// Skip if no PMU present
+	b.lt	9000f
+	msr	pmuserenr_el0, xzr		// Disable PMU access from EL0
+9000:
+	.endm
+
+/*
+ * copy_page - copy src to dest using temp registers t1-t8
+ */
+	.macro copy_page dest:req src:req t1:req t2:req t3:req t4:req t5:req t6:req t7:req t8:req
+9998:	ldp	\t1, \t2, [\src]
+	ldp	\t3, \t4, [\src, #16]
+	ldp	\t5, \t6, [\src, #32]
+	ldp	\t7, \t8, [\src, #48]
+	add	\src, \src, #64
+	stnp	\t1, \t2, [\dest]
+	stnp	\t3, \t4, [\dest, #16]
+	stnp	\t5, \t6, [\dest, #32]
+	stnp	\t7, \t8, [\dest, #48]
+	add	\dest, \dest, #64
+	tst	\src, #(PAGE_SIZE - 1)
+	b.ne	9998b
 	.endm
 
 	/*
@@ -361,6 +586,17 @@ alternative_endif
 	.size	__pi_##x, . - x;	\
 	ENDPROC(x)
 
+/*
+ * Annotate a function as being unsuitable for kprobes.
+ */
+#ifdef CONFIG_KPROBES
+#define NOKPROBE(x)				\
+	.pushsection "_kprobe_blacklist", "aw";	\
+	.quad	x;				\
+	.popsection;
+#else
+#define NOKPROBE(x)
+#endif
 	/*
 	 * Emit a 64-bit absolute little endian symbol reference in a way that
 	 * ensures that it will be resolved at build time, even when building a
@@ -399,11 +635,25 @@ alternative_endif
 	mrs	\rd, sp_el0
 	.endm
 
+/**
+ * Errata workaround prior to disable MMU. Insert an ISB immediately prior
+ * to executing the MSR that will change SCTLR_ELn[M] from a value of 1 to 0.
+ */
+	.macro pre_disable_mmu_workaround
+#ifdef CONFIG_QCOM_FALKOR_ERRATUM_E1041
+	isb
+#endif
+	.endm
+
+	.macro	pte_to_phys, phys, pte
+	and	\phys, \pte, #(((1 << (48 - PAGE_SHIFT)) - 1) << PAGE_SHIFT)
+	.endm
+
 /*
  * Check the MIDR_EL1 of the current CPU for a given model and a range of
  * variant/revision. See asm/cputype.h for the macros used below.
  *
- *	model:		MIDR_CPU_PART of CPU
+ *	model:		MIDR_CPU_MODEL of CPU
  *	rv_min:		Minimum of MIDR_CPU_VAR_REV()
  *	rv_max:		Maximum of MIDR_CPU_VAR_REV()
  *	res:		Result register.
@@ -415,7 +665,7 @@ alternative_endif
 	.macro	cpu_midr_match model, rv_min, rv_max, res, tmp1, tmp2, tmp3
 	mrs		\res, midr_el1
 	mov_q		\tmp1, (MIDR_REVISION_MASK | MIDR_VARIANT_MASK)
-	mov_q		\tmp2, MIDR_CPU_PART_MASK
+	mov_q		\tmp2, MIDR_CPU_MODEL_MASK
 	and		\tmp3, \res, \tmp2	// Extract model
 	and		\tmp1, \res, \tmp1	// rev & variant
 	mov_q		\tmp2, \model

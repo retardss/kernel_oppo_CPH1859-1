@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for misc devices that really don't fit anywhere else.
 #
@@ -8,9 +9,6 @@ obj-$(CONFIG_AD525X_DPOT_SPI)	+= ad525x_dpot-spi.o
 obj-$(CONFIG_INTEL_MID_PTI)	+= pti.o
 obj-$(CONFIG_ATMEL_SSC)		+= atmel-ssc.o
 obj-$(CONFIG_ATMEL_TCLIB)	+= atmel_tclib.o
-obj-$(CONFIG_BMP085)		+= bmp085.o
-obj-$(CONFIG_BMP085_I2C)	+= bmp085-i2c.o
-obj-$(CONFIG_BMP085_SPI)	+= bmp085-spi.o
 obj-$(CONFIG_DUMMY_IRQ)		+= dummy-irq.o
 obj-$(CONFIG_ICS932S401)	+= ics932s401.o
 obj-$(CONFIG_LKDTM)		+= lkdtm.o
@@ -18,7 +16,6 @@ obj-$(CONFIG_TIFM_CORE)       	+= tifm_core.o
 obj-$(CONFIG_TIFM_7XX1)       	+= tifm_7xx1.o
 obj-$(CONFIG_PHANTOM)		+= phantom.o
 obj-$(CONFIG_QCOM_COINCELL)	+= qcom-coincell.o
-obj-$(CONFIG_SENSORS_BH1780)	+= bh1780gli.o
 obj-$(CONFIG_SENSORS_BH1770)	+= bh1770glc.o
 obj-$(CONFIG_SENSORS_APDS990X)	+= apds990x.o
 obj-$(CONFIG_SGI_IOC4)		+= ioc4.o
@@ -40,7 +37,6 @@ obj-y				+= eeprom/
 obj-y				+= cb710/
 obj-$(CONFIG_SPEAR13XX_PCIE_GADGET)	+= spear13xx_pcie_gadget.o
 obj-$(CONFIG_VMWARE_BALLOON)	+= vmw_balloon.o
-obj-$(CONFIG_ARM_CHARLCD)	+= arm-charlcd.o
 obj-$(CONFIG_PCH_PHUB)		+= pch_phub.o
 obj-y				+= ti-st/
 obj-y				+= lis3lv02d/
@@ -50,15 +46,46 @@ obj-$(CONFIG_INTEL_MEI)		+= mei/
 obj-$(CONFIG_VMWARE_VMCI)	+= vmw_vmci/
 obj-$(CONFIG_LATTICE_ECP3_CONFIG)	+= lattice-ecp3-config.o
 obj-$(CONFIG_SRAM)		+= sram.o
+obj-$(CONFIG_SRAM_EXEC)		+= sram-exec.o
 obj-y				+= mic/
 obj-$(CONFIG_GENWQE)		+= genwqe/
+obj-$(CONFIG_HDCP_QSEECOM)	+= hdcp_qseecom.o
+obj-$(CONFIG_HDCP_QSEECOM)	+= msm_hdcp.o
+obj-$(CONFIG_QSEECOM)		+= qseecom.o
 obj-$(CONFIG_ECHO)		+= echo/
 obj-$(CONFIG_VEXPRESS_SYSCFG)	+= vexpress-syscfg.o
 obj-$(CONFIG_CXL_BASE)		+= cxl/
-obj-$(CONFIG_UID_SYS_STATS) += uid_sys_stats.o
-obj-$(CONFIG_MEDIATEK_SOLUTION)	+= mediatek/
-obj-$(CONFIG_MEMORY_STATE_TIME) += memory_state_time.o
-# Mengmeng.Wang@SRC.System, 2018/08/28, Add for oiface
-#ifdef VENDOR_EDIT
-obj-y		+= schedx.o
-#endif
+obj-$(CONFIG_ASPEED_LPC_CTRL)  += aspeed-lpc-ctrl.o
+obj-$(CONFIG_ASPEED_LPC_SNOOP) += aspeed-lpc-snoop.o
+obj-$(CONFIG_PCI_ENDPOINT_TEST)        += pci_endpoint_test.o
+obj-$(CONFIG_FPR_FPC) 	+= fpr_FingerprintCard/
+
+obj-$(CONFIG_UID_SYS_STATS)	+= uid_sys_stats.o
+obj-$(CONFIG_MEMORY_STATE_TIME)	+= memory_state_time.o
+obj-$(CONFIG_QPNP_MISC) 	+= qpnp-misc.o
+
+obj-$(CONFIG_OKL4_USER_VIRQ)	+= okl4-virq.o
+obj-$(CONFIG_OKL4_RINGBUF)	+= okl4-ringbuf.o
+obj-$(CONFIG_TEST_IRQ_REQUESTER) += irq_requester.o
+
+lkdtm-$(CONFIG_LKDTM)		+= lkdtm_core.o
+lkdtm-$(CONFIG_LKDTM)		+= lkdtm_bugs.o
+lkdtm-$(CONFIG_LKDTM)		+= lkdtm_heap.o
+lkdtm-$(CONFIG_LKDTM)		+= lkdtm_perms.o
+lkdtm-$(CONFIG_LKDTM)		+= lkdtm_refcount.o
+lkdtm-$(CONFIG_LKDTM)		+= lkdtm_rodata_objcopy.o
+lkdtm-$(CONFIG_LKDTM)		+= lkdtm_usercopy.o
+
+KCOV_INSTRUMENT_lkdtm_rodata.o	:= n
+CFLAGS_lkdtm_rodata.o		+= $(DISABLE_LTO)
+
+OBJCOPYFLAGS :=
+OBJCOPYFLAGS_lkdtm_rodata_objcopy.o := \
+	--rename-section .text=.rodata,alloc,readonly,load
+targets += lkdtm_rodata.o lkdtm_rodata_objcopy.o
+$(obj)/lkdtm_rodata_objcopy.o: $(obj)/lkdtm_rodata.o FORCE
+	$(call if_changed,objcopy)
+
+obj-$(CONFIG_OKL4_USER_VIPC)    += okl4-vipc.o
+obj-$(CONFIG_OKL4_GUEST)        += okl4-panic.o
+obj-$(CONFIG_OKL4_LINK_SHBUF)    += okl4-link-shbuf.o

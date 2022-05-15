@@ -21,7 +21,10 @@
 
 static inline void set_my_cpu_offset(unsigned long off)
 {
-	asm volatile("msr tpidr_el1, %0" :: "r" (off) : "memory");
+	asm volatile(ALTERNATIVE("msr tpidr_el1, %0",
+				 "msr tpidr_el2, %0",
+				 ARM64_HAS_VIRT_HOST_EXTN)
+			:: "r" (off) : "memory");
 }
 
 static inline unsigned long __my_cpu_offset(void)
@@ -32,7 +35,10 @@ static inline unsigned long __my_cpu_offset(void)
 	 * We want to allow caching the value, so avoid using volatile and
 	 * instead use a fake stack read to hazard against barrier().
 	 */
-	asm("mrs %0, tpidr_el1" : "=r" (off) :
+	asm(ALTERNATIVE("mrs %0, tpidr_el1",
+			"mrs %0, tpidr_el2",
+			ARM64_HAS_VIRT_HOST_EXTN)
+		: "=r" (off) :
 		"Q" (*(const unsigned long *)current_stack_pointer));
 
 	return off;
@@ -43,12 +49,11 @@ static inline unsigned long __my_cpu_offset(void)
 static inline unsigned long __percpu_##op(void *ptr,			\
 			unsigned long val, int size)			\
 {									\
-	unsigned long loop, ret;					\
+	unsigned long loop, ret = 0;					\
 									\
 	switch (size) {							\
 	case 1:								\
 		asm ("//__per_cpu_" #op "_1\n"				\
-		ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_855872)	\
 		"1:	ldxrb	  %w[ret], %[ptr]\n"			\
 			#asm_op " %w[ret], %w[ret], %w[val]\n"		\
 		"	stxrb	  %w[loop], %w[ret], %[ptr]\n"		\
@@ -59,7 +64,6 @@ static inline unsigned long __percpu_##op(void *ptr,			\
 		break;							\
 	case 2:								\
 		asm ("//__per_cpu_" #op "_2\n"				\
-		ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_855872)	\
 		"1:	ldxrh	  %w[ret], %[ptr]\n"			\
 			#asm_op " %w[ret], %w[ret], %w[val]\n"		\
 		"	stxrh	  %w[loop], %w[ret], %[ptr]\n"		\
@@ -70,7 +74,6 @@ static inline unsigned long __percpu_##op(void *ptr,			\
 		break;							\
 	case 4:								\
 		asm ("//__per_cpu_" #op "_4\n"				\
-		ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_855872)	\
 		"1:	ldxr	  %w[ret], %[ptr]\n"			\
 			#asm_op " %w[ret], %w[ret], %w[val]\n"		\
 		"	stxr	  %w[loop], %w[ret], %[ptr]\n"		\
@@ -81,7 +84,6 @@ static inline unsigned long __percpu_##op(void *ptr,			\
 		break;							\
 	case 8:								\
 		asm ("//__per_cpu_" #op "_8\n"				\
-		ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_855872)	\
 		"1:	ldxr	  %[ret], %[ptr]\n"			\
 			#asm_op " %[ret], %[ret], %[val]\n"		\
 		"	stxr	  %w[loop], %[ret], %[ptr]\n"		\
@@ -105,20 +107,20 @@ PERCPU_OP(or, orr)
 
 static inline unsigned long __percpu_read(void *ptr, int size)
 {
-	unsigned long ret;
+	unsigned long ret = 0;
 
 	switch (size) {
 	case 1:
-		ret = ACCESS_ONCE(*(u8 *)ptr);
+		ret = READ_ONCE(*(u8 *)ptr);
 		break;
 	case 2:
-		ret = ACCESS_ONCE(*(u16 *)ptr);
+		ret = READ_ONCE(*(u16 *)ptr);
 		break;
 	case 4:
-		ret = ACCESS_ONCE(*(u32 *)ptr);
+		ret = READ_ONCE(*(u32 *)ptr);
 		break;
 	case 8:
-		ret = ACCESS_ONCE(*(u64 *)ptr);
+		ret = READ_ONCE(*(u64 *)ptr);
 		break;
 	default:
 		ret = 0;
@@ -132,16 +134,16 @@ static inline void __percpu_write(void *ptr, unsigned long val, int size)
 {
 	switch (size) {
 	case 1:
-		ACCESS_ONCE(*(u8 *)ptr) = (u8)val;
+		WRITE_ONCE(*(u8 *)ptr, (u8)val);
 		break;
 	case 2:
-		ACCESS_ONCE(*(u16 *)ptr) = (u16)val;
+		WRITE_ONCE(*(u16 *)ptr, (u16)val);
 		break;
 	case 4:
-		ACCESS_ONCE(*(u32 *)ptr) = (u32)val;
+		WRITE_ONCE(*(u32 *)ptr, (u32)val);
 		break;
 	case 8:
-		ACCESS_ONCE(*(u64 *)ptr) = (u64)val;
+		WRITE_ONCE(*(u64 *)ptr, (u64)val);
 		break;
 	default:
 		BUILD_BUG();
@@ -151,12 +153,11 @@ static inline void __percpu_write(void *ptr, unsigned long val, int size)
 static inline unsigned long __percpu_xchg(void *ptr, unsigned long val,
 						int size)
 {
-	unsigned long ret, loop;
+	unsigned long ret = 0, loop;
 
 	switch (size) {
 	case 1:
 		asm ("//__percpu_xchg_1\n"
-		ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_855872)
 		"1:	ldxrb	%w[ret], %[ptr]\n"
 		"	stxrb	%w[loop], %w[val], %[ptr]\n"
 		"	cbnz	%w[loop], 1b"
@@ -166,7 +167,6 @@ static inline unsigned long __percpu_xchg(void *ptr, unsigned long val,
 		break;
 	case 2:
 		asm ("//__percpu_xchg_2\n"
-		ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_855872)
 		"1:	ldxrh	%w[ret], %[ptr]\n"
 		"	stxrh	%w[loop], %w[val], %[ptr]\n"
 		"	cbnz	%w[loop], 1b"
@@ -176,7 +176,6 @@ static inline unsigned long __percpu_xchg(void *ptr, unsigned long val,
 		break;
 	case 4:
 		asm ("//__percpu_xchg_4\n"
-		ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_855872)
 		"1:	ldxr	%w[ret], %[ptr]\n"
 		"	stxr	%w[loop], %w[val], %[ptr]\n"
 		"	cbnz	%w[loop], 1b"
@@ -186,7 +185,6 @@ static inline unsigned long __percpu_xchg(void *ptr, unsigned long val,
 		break;
 	case 8:
 		asm ("//__percpu_xchg_8\n"
-		ALTERNATIVE("nop", "dmb sy", ARM64_WORKAROUND_855872)
 		"1:	ldxr	%[ret], %[ptr]\n"
 		"	stxr	%w[loop], %[val], %[ptr]\n"
 		"	cbnz	%w[loop], 1b"
@@ -205,19 +203,19 @@ static inline unsigned long __percpu_xchg(void *ptr, unsigned long val,
 #define _percpu_read(pcp)						\
 ({									\
 	typeof(pcp) __retval;						\
-	preempt_disable();						\
+	preempt_disable_notrace();					\
 	__retval = (typeof(pcp))__percpu_read(raw_cpu_ptr(&(pcp)), 	\
 					      sizeof(pcp));		\
-	preempt_enable();						\
+	preempt_enable_notrace();					\
 	__retval;							\
 })
 
 #define _percpu_write(pcp, val)						\
 do {									\
-	preempt_disable();						\
+	preempt_disable_notrace();					\
 	__percpu_write(raw_cpu_ptr(&(pcp)), (unsigned long)(val), 	\
 				sizeof(pcp));				\
-	preempt_enable();						\
+	preempt_enable_notrace();					\
 } while(0)								\
 
 #define _pcp_protect(operation, pcp, val)			\

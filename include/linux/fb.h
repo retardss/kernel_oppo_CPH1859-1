@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_FB_H
 #define _LINUX_FB_H
 
@@ -175,9 +176,27 @@ struct fb_blit_caps {
 	u32 flags;
 };
 
+#ifdef CONFIG_FB_NOTIFY
 extern int fb_register_client(struct notifier_block *nb);
 extern int fb_unregister_client(struct notifier_block *nb);
 extern int fb_notifier_call_chain(unsigned long val, void *v);
+#else
+static inline int fb_register_client(struct notifier_block *nb)
+{
+	return 0;
+};
+
+static inline int fb_unregister_client(struct notifier_block *nb)
+{
+	return 0;
+};
+
+static inline int fb_notifier_call_chain(unsigned long val, void *v)
+{
+	return 0;
+};
+#endif
+
 /*
  * Pixmap structure definition
  *
@@ -278,9 +297,6 @@ struct fb_ops {
 	/* Draws cursor */
 	int (*fb_cursor) (struct fb_info *info, struct fb_cursor *cursor);
 
-	/* Rotates the display */
-	void (*fb_rotate)(struct fb_info *info, int angle);
-
 	/* wait for blit idle, optional */
 	int (*fb_sync)(struct fb_info *info);
 
@@ -288,9 +304,17 @@ struct fb_ops {
 	int (*fb_ioctl)(struct fb_info *info, unsigned int cmd,
 			unsigned long arg);
 
+	/* perform fb specific ioctl v2 (optional) - provides file param */
+	int (*fb_ioctl_v2)(struct fb_info *info, unsigned int cmd,
+					unsigned long arg, struct file *file);
+
 	/* Handle 32bit compat ioctl (optional) */
-	int (*fb_compat_ioctl)(struct fb_info *info, unsigned cmd,
+	int (*fb_compat_ioctl)(struct fb_info *info, unsigned int cmd,
 			unsigned long arg);
+
+	/* Handle 32bit compat ioctl (optional) */
+	int (*fb_compat_ioctl_v2)(struct fb_info *info, unsigned int cmd,
+				  unsigned long arg, struct file *file);
 
 	/* perform fb specific mmap */
 	int (*fb_mmap)(struct fb_info *info, struct vm_area_struct *vma);
@@ -385,7 +409,7 @@ struct fb_tile_ops {
 #endif /* CONFIG_FB_TILEBLITTING */
 
 /* FBINFO_* = fb_info.flags bit flags */
-#define FBINFO_MODULE		0x0001	/* Low-level driver is a module */
+#define FBINFO_DEFAULT		0
 #define FBINFO_HWACCEL_DISABLED	0x0002
 	/* When FBINFO_HWACCEL_DISABLED is set:
 	 *  Hardware acceleration is turned off.  Software implementations
@@ -460,6 +484,7 @@ struct fb_info {
 	struct fb_cmap cmap;		/* Current cmap */
 	struct list_head modelist;      /* mode list */
 	struct fb_videomode *mode;	/* current mode */
+	struct file *file;		/* current file node */
 
 #ifdef CONFIG_FB_BACKLIGHT
 	/* assigned backlight device */
@@ -518,14 +543,6 @@ static inline struct apertures_struct *alloc_apertures(unsigned int max_num) {
 	return a;
 }
 
-#ifdef MODULE
-#define FBINFO_DEFAULT	FBINFO_MODULE
-#else
-#define FBINFO_DEFAULT	0
-#endif
-
-// This will go away
-#define FBINFO_FLAG_MODULE	FBINFO_MODULE
 #define FBINFO_FLAG_DEFAULT	FBINFO_DEFAULT
 
 /* This will go away
@@ -661,6 +678,7 @@ static inline void __fb_pad_aligned_buffer(u8 *dst, u32 d_pitch,
 }
 
 /* drivers/video/fb_defio.c */
+int fb_deferred_io_mmap(struct fb_info *info, struct vm_area_struct *vma);
 extern void fb_deferred_io_init(struct fb_info *info);
 extern void fb_deferred_io_open(struct fb_info *info,
 				struct inode *inode,
@@ -719,8 +737,6 @@ extern int fb_parse_edid(unsigned char *edid, struct fb_var_screeninfo *var);
 extern const unsigned char *fb_firmware_edid(struct device *device);
 extern void fb_edid_to_monspecs(unsigned char *edid,
 				struct fb_monspecs *specs);
-extern void fb_edid_add_monspecs(unsigned char *edid,
-				 struct fb_monspecs *specs);
 extern void fb_destroy_modedb(struct fb_videomode *modedb);
 extern int fb_find_mode_cvt(struct fb_videomode *mode, int margins, int rb);
 extern unsigned char *fb_ddc_read(struct i2c_adapter *adapter);
@@ -794,7 +810,6 @@ struct dmt_videomode {
 
 extern const char *fb_mode_option;
 extern const struct fb_videomode vesa_modes[];
-extern const struct fb_videomode cea_modes[65];
 extern const struct dmt_videomode dmt_modes[];
 
 struct fb_modelist {

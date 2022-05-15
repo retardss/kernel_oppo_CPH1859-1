@@ -101,8 +101,11 @@ static ssize_t debug_read_regs(struct file *file, char __user *userbuf,
 	mutex_lock(&iommu_debug_lock);
 
 	bytes = omap_iommu_dump_ctx(obj, p, count);
+	if (bytes < 0)
+		goto err;
 	bytes = simple_read_from_buffer(userbuf, count, ppos, buf, bytes);
 
+err:
 	mutex_unlock(&iommu_debug_lock);
 	kfree(buf);
 
@@ -136,7 +139,7 @@ static ssize_t iotlb_dump_cr(struct omap_iommu *obj, struct cr_regs *cr,
 			     struct seq_file *s)
 {
 	seq_printf(s, "%08x %08x %01x\n", cr->cam, cr->ram,
-			  (cr->cam & MMU_CAM_P) ? 1 : 0);
+		   (cr->cam & MMU_CAM_P) ? 1 : 0);
 	return 0;
 }
 

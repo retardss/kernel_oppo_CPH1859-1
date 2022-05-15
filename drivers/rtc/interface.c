@@ -104,7 +104,17 @@ static int rtc_read_alarm_internal(struct rtc_device *rtc, struct rtc_wkalrm *al
 	else if (!rtc->ops->read_alarm)
 		err = -EINVAL;
 	else {
-		memset(alarm, 0, sizeof(struct rtc_wkalrm));
+		alarm->enabled = 0;
+		alarm->pending = 0;
+		alarm->time.tm_sec = -1;
+		alarm->time.tm_min = -1;
+		alarm->time.tm_hour = -1;
+		alarm->time.tm_mday = -1;
+		alarm->time.tm_mon = -1;
+		alarm->time.tm_year = -1;
+		alarm->time.tm_wday = -1;
+		alarm->time.tm_yday = -1;
+		alarm->time.tm_isdst = -1;
 		err = rtc->ops->read_alarm(rtc->dev.parent, alarm);
 	}
 
@@ -217,6 +227,13 @@ int __rtc_read_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 			missing = year;
 	}
 
+	/* Can't proceed if alarm is still invalid after replacing
+	 * missing fields.
+	 */
+	err = rtc_valid_tm(&alarm->time);
+	if (err)
+		goto done;
+
 	/* with luck, no rollover is needed */
 	t_now = rtc_tm_to_time64(&now);
 	t_alm = rtc_tm_to_time64(&alarm->time);
@@ -268,9 +285,9 @@ int __rtc_read_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 		dev_warn(&rtc->dev, "alarm rollover not handled\n");
 	}
 
-done:
 	err = rtc_valid_tm(&alarm->time);
 
+done:
 	if (err) {
 		dev_warn(&rtc->dev, "invalid alarm value: %d-%d-%d %d:%d:%d\n",
 			alarm->time.tm_year + 1900, alarm->time.tm_mon + 1,
@@ -358,7 +375,7 @@ int rtc_set_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 		rtc_timer_remove(rtc, &rtc->aie_timer);
 
 	rtc->aie_timer.node.expires = rtc_tm_to_ktime(alarm->time);
-	rtc->aie_timer.period = ktime_set(0, 0);
+	rtc->aie_timer.period = 0;
 	if (alarm->enabled)
 		err = rtc_timer_enqueue(rtc, &rtc->aie_timer);
 
@@ -367,29 +384,13 @@ int rtc_set_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 }
 EXPORT_SYMBOL_GPL(rtc_set_alarm);
 
-int rtc_set_alarm_poweron(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
+static void rtc_alarm_disable(struct rtc_device *rtc)
 {
-	int err;
+	if (!rtc->ops || !rtc->ops->alarm_irq_enable)
+		return;
 
-	err = rtc_valid_tm(&alarm->time);
-	if (err != 0)
-		return err;
-
-	err = mutex_lock_interruptible(&rtc->ops_lock);
-	if (err)
-		return err;
-
-	if (!rtc->ops)
-		err = -ENODEV;
-	else if (!rtc->ops->set_alarm)
-		err = -EINVAL;
-	else
-		err = rtc->ops->set_alarm(rtc->dev.parent, alarm);
-
-	mutex_unlock(&rtc->ops_lock);
-	return err;
+	rtc->ops->alarm_irq_enable(rtc->dev.parent, false);
 }
-EXPORT_SYMBOL_GPL(rtc_set_alarm_poweron);
 
 /* Called once per device from rtc_device_register */
 int rtc_initialize_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
@@ -410,21 +411,23 @@ int rtc_initialize_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 		return err;
 
 	rtc->aie_timer.node.expires = rtc_tm_to_ktime(alarm->time);
-	rtc->aie_timer.period = ktime_set(0, 0);
+	rtc->aie_timer.period = 0;
 
-	/* Alarm has to be enabled & in the futrure for us to enqueue it */
-	if (alarm->enabled && (rtc_tm_to_ktime(now).tv64 <
-			 rtc->aie_timer.node.expires.tv64)) {
+	/* Alarm has to be enabled & in the future for us to enqueue it */
+	if (alarm->enabled && (rtc_tm_to_ktime(now) <
+			 rtc->aie_timer.node.expires)) {
 
 		rtc->aie_timer.enabled = 1;
 		timerqueue_add(&rtc->timerqueue, &rtc->aie_timer.node);
+	} else if (alarm->enabled && (rtc_tm_to_ktime(now) >=
+			rtc->aie_timer.node.expires)){
+		rtc_alarm_disable(rtc);
 	}
+
 	mutex_unlock(&rtc->ops_lock);
 	return err;
 }
 EXPORT_SYMBOL_GPL(rtc_initialize_alarm);
-
-
 
 int rtc_alarm_irq_enable(struct rtc_device *rtc, unsigned int enabled)
 {
@@ -575,7 +578,7 @@ enum hrtimer_restart rtc_pie_update_irq(struct hrtimer *timer)
 	int count;
 	rtc = container_of(timer, struct rtc_device, pie_timer);
 
-	period = ktime_set(0, NSEC_PER_SEC/rtc->irq_freq);
+	period = NSEC_PER_SEC / rtc->irq_freq;
 	count = hrtimer_forward_now(timer, period);
 
 	rtc_handle_legacy_irq(rtc, count, RTC_PF);
@@ -686,7 +689,7 @@ static int rtc_update_hrtimer(struct rtc_device *rtc, int enabled)
 		return -1;
 
 	if (enabled) {
-		ktime_t period = ktime_set(0, NSEC_PER_SEC / rtc->irq_freq);
+		ktime_t period = NSEC_PER_SEC / rtc->irq_freq;
 
 		hrtimer_start(&rtc->pie_timer, period, HRTIMER_MODE_REL);
 	}
@@ -787,7 +790,7 @@ static int rtc_timer_enqueue(struct rtc_device *rtc, struct rtc_timer *timer)
 
 	/* Skip over expired timers */
 	while (next) {
-		if (next->expires.tv64 >= now.tv64)
+		if (next->expires >= now)
 			break;
 		next = timerqueue_iterate_next(next);
 	}
@@ -809,14 +812,6 @@ static int rtc_timer_enqueue(struct rtc_device *rtc, struct rtc_timer *timer)
 		}
 	}
 	return 0;
-}
-
-static void rtc_alarm_disable(struct rtc_device *rtc)
-{
-	if (!rtc->ops || !rtc->ops->alarm_irq_enable)
-		return;
-
-	rtc->ops->alarm_irq_enable(rtc->dev.parent, false);
 }
 
 /**
@@ -879,7 +874,7 @@ again:
 	__rtc_read_time(rtc, &tm);
 	now = rtc_tm_to_ktime(tm);
 	while ((next = timerqueue_getnext(&rtc->timerqueue))) {
-		if (next->expires.tv64 > now.tv64)
+		if (next->expires > now)
 			break;
 
 		/* expire timer */
@@ -982,4 +977,58 @@ void rtc_timer_cancel(struct rtc_device *rtc, struct rtc_timer *timer)
 	mutex_unlock(&rtc->ops_lock);
 }
 
+/**
+ * rtc_read_offset - Read the amount of rtc offset in parts per billion
+ * @ rtc: rtc device to be used
+ * @ offset: the offset in parts per billion
+ *
+ * see below for details.
+ *
+ * Kernel interface to read rtc clock offset
+ * Returns 0 on success, or a negative number on error.
+ * If read_offset() is not implemented for the rtc, return -EINVAL
+ */
+int rtc_read_offset(struct rtc_device *rtc, long *offset)
+{
+	int ret;
 
+	if (!rtc->ops)
+		return -ENODEV;
+
+	if (!rtc->ops->read_offset)
+		return -EINVAL;
+
+	mutex_lock(&rtc->ops_lock);
+	ret = rtc->ops->read_offset(rtc->dev.parent, offset);
+	mutex_unlock(&rtc->ops_lock);
+	return ret;
+}
+
+/**
+ * rtc_set_offset - Adjusts the duration of the average second
+ * @ rtc: rtc device to be used
+ * @ offset: the offset in parts per billion
+ *
+ * Some rtc's allow an adjustment to the average duration of a second
+ * to compensate for differences in the actual clock rate due to temperature,
+ * the crystal, capacitor, etc.
+ *
+ * Kernel interface to adjust an rtc clock offset.
+ * Return 0 on success, or a negative number on error.
+ * If the rtc offset is not setable (or not implemented), return -EINVAL
+ */
+int rtc_set_offset(struct rtc_device *rtc, long offset)
+{
+	int ret;
+
+	if (!rtc->ops)
+		return -ENODEV;
+
+	if (!rtc->ops->set_offset)
+		return -EINVAL;
+
+	mutex_lock(&rtc->ops_lock);
+	ret = rtc->ops->set_offset(rtc->dev.parent, offset);
+	mutex_unlock(&rtc->ops_lock);
+	return ret;
+}

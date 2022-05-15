@@ -50,6 +50,7 @@
 #define DRIVER_VERSION	"02 May 2005"
 
 #define POWER_BUDGET	500	/* in mA; use 8 for low-power port testing */
+#define POWER_BUDGET_3	900	/* in mA */
 
 static const char	driver_name[] = "dummy_hcd";
 static const char	driver_desc[] = "USB Host+Gadget Emulator";
@@ -511,7 +512,7 @@ static int dummy_enable(struct usb_ep *_ep,
 	 * maximum packet size.
 	 * For SS devices the wMaxPacketSize is limited by 1024.
 	 */
-	max = usb_endpoint_maxp(desc) & 0x7ff;
+	max = usb_endpoint_maxp(desc);
 
 	/* drivers must not request bad settings, since lower levels
 	 * (hardware or its drivers) may not check.  some endpoints
@@ -655,12 +656,10 @@ static int dummy_disable(struct usb_ep *_ep)
 static struct usb_request *dummy_alloc_request(struct usb_ep *_ep,
 		gfp_t mem_flags)
 {
-	struct dummy_ep		*ep;
 	struct dummy_request	*req;
 
 	if (!_ep)
 		return NULL;
-	ep = usb_ep_to_dummy_ep(_ep);
 
 	req = kzalloc(sizeof(*req), mem_flags);
 	if (!req)
@@ -898,22 +897,6 @@ static int dummy_pullup(struct usb_gadget *_gadget, int value)
 	unsigned long	flags;
 
 	dum = gadget_dev_to_dummy(&_gadget->dev);
-
-	if (value && dum->driver) {
-		if (mod_data.is_super_speed)
-			dum->gadget.speed = dum->driver->max_speed;
-		else if (mod_data.is_high_speed)
-			dum->gadget.speed = min_t(u8, USB_SPEED_HIGH,
-					dum->driver->max_speed);
-		else
-			dum->gadget.speed = USB_SPEED_FULL;
-		dummy_udc_update_ep0(dum);
-
-		if (dum->gadget.speed < dum->driver->max_speed)
-			dev_dbg(udc_dev(dum), "This device can perform faster"
-				" if you connect it to a %s port...\n",
-				usb_speed_string(dum->driver->max_speed));
-	}
 	dum_hcd = gadget_to_dummy_hcd(_gadget);
 
 	spin_lock_irqsave(&dum->lock, flags);
@@ -923,6 +906,28 @@ static int dummy_pullup(struct usb_gadget *_gadget, int value)
 
 	usb_hcd_poll_rh_status(dummy_hcd_to_hcd(dum_hcd));
 	return 0;
+}
+
+static void dummy_udc_set_speed(struct usb_gadget *_gadget,
+		enum usb_device_speed speed)
+{
+	struct dummy	*dum;
+
+	dum = gadget_dev_to_dummy(&_gadget->dev);
+
+	 if (mod_data.is_super_speed)
+		 dum->gadget.speed = min_t(u8, USB_SPEED_SUPER, speed);
+	 else if (mod_data.is_high_speed)
+		 dum->gadget.speed = min_t(u8, USB_SPEED_HIGH, speed);
+	 else
+		 dum->gadget.speed = USB_SPEED_FULL;
+
+	dummy_udc_update_ep0(dum);
+
+	if (dum->gadget.speed < speed)
+		dev_dbg(udc_dev(dum), "This device can perform faster"
+			" if you connect it to a %s port...\n",
+			usb_speed_string(speed));
 }
 
 static int dummy_udc_start(struct usb_gadget *g,
@@ -936,6 +941,7 @@ static const struct usb_gadget_ops dummy_ops = {
 	.pullup		= dummy_pullup,
 	.udc_start	= dummy_udc_start,
 	.udc_stop	= dummy_udc_stop,
+	.udc_set_speed	= dummy_udc_set_speed,
 };
 
 /*-------------------------------------------------------------------------*/
@@ -1319,7 +1325,7 @@ static int dummy_perform_transfer(struct urb *urb, struct dummy_request *req,
 	u32 this_sg;
 	bool next_sg;
 
-	to_host = usb_pipein(urb->pipe);
+	to_host = usb_urb_dir_in(urb);
 	rbuf = req->req.buf + req->req.actual;
 
 	if (!urb->num_sgs) {
@@ -1407,7 +1413,7 @@ top:
 
 		/* FIXME update emulated data toggle too */
 
-		to_host = usb_pipein(urb->pipe);
+		to_host = usb_urb_dir_in(urb);
 		if (unlikely(len == 0))
 			is_short = 1;
 		else {
@@ -1517,8 +1523,7 @@ static int periodic_bytes(struct dummy *dum, struct dummy_ep *ep)
 		int	tmp;
 
 		/* high bandwidth mode */
-		tmp = usb_endpoint_maxp(ep->desc);
-		tmp = (tmp >> 11) & 0x03;
+		tmp = usb_endpoint_maxp_mult(ep->desc);
 		tmp *= 8 /* applies to entire frame */;
 		limit += limit * tmp;
 	}
@@ -1832,7 +1837,7 @@ restart:
 
 		/* find the gadget's ep for this request (if configured) */
 		address = usb_pipeendpoint (urb->pipe);
-		if (usb_pipein(urb->pipe))
+		if (usb_urb_dir_in(urb))
 			address |= USB_DIR_IN;
 		ep = find_endpoint(dum, address);
 		if (!ep) {
@@ -2385,7 +2390,7 @@ static inline ssize_t show_urb(char *buf, size_t size, struct urb *urb)
 			s = "?";
 			break;
 		 } s; }),
-		ep, ep ? (usb_pipein(urb->pipe) ? "in" : "out") : "",
+		ep, ep ? (usb_urb_dir_in(urb) ? "in" : "out") : "",
 		({ char *s; \
 		switch (usb_pipetype(urb->pipe)) { \
 		case PIPE_CONTROL: \
@@ -2435,7 +2440,7 @@ static int dummy_start_ss(struct dummy_hcd *dum_hcd)
 	dum_hcd->rh_state = DUMMY_RH_RUNNING;
 	dum_hcd->stream_en_ep = 0;
 	INIT_LIST_HEAD(&dum_hcd->urbp_list);
-	dummy_hcd_to_hcd(dum_hcd)->power_budget = POWER_BUDGET;
+	dummy_hcd_to_hcd(dum_hcd)->power_budget = POWER_BUDGET_3;
 	dummy_hcd_to_hcd(dum_hcd)->state = HC_STATE_RUNNING;
 	dummy_hcd_to_hcd(dum_hcd)->uses_new_polling = 1;
 #ifdef CONFIG_USB_OTG
@@ -2481,9 +2486,6 @@ static int dummy_start(struct usb_hcd *hcd)
 
 static void dummy_stop(struct usb_hcd *hcd)
 {
-	struct dummy		*dum;
-
-	dum = hcd_to_dummy_hcd(hcd)->dum;
 	device_remove_file(dummy_dev(hcd_to_dummy_hcd(hcd)), &dev_attr_urbs);
 	dev_info(dummy_dev(hcd_to_dummy_hcd(hcd)), "stopped\n");
 }
@@ -2732,7 +2734,7 @@ static struct platform_driver dummy_hcd_driver = {
 };
 
 /*-------------------------------------------------------------------------*/
-#define MAX_NUM_UDC	2
+#define MAX_NUM_UDC	32
 static struct platform_device *the_udc_pdev[MAX_NUM_UDC];
 static struct platform_device *the_hcd_pdev[MAX_NUM_UDC];
 
@@ -2740,7 +2742,7 @@ static int __init init(void)
 {
 	int	retval = -ENOMEM;
 	int	i;
-	struct	dummy *dum[MAX_NUM_UDC];
+	struct	dummy *dum[MAX_NUM_UDC] = {};
 
 	if (usb_disabled())
 		return -ENODEV;
@@ -2821,7 +2823,7 @@ static int __init init(void)
 		if (retval < 0) {
 			i--;
 			while (i >= 0)
-				platform_device_del(the_udc_pdev[i]);
+				platform_device_del(the_udc_pdev[i--]);
 			goto err_add_udc;
 		}
 	}

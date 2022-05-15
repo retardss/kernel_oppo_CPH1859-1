@@ -159,21 +159,23 @@ minstrel_update_rates(struct minstrel_priv *mp, struct minstrel_sta_info *mi)
 void
 minstrel_calc_rate_stats(struct minstrel_rate_stats *mrs)
 {
+	unsigned int cur_prob;
+
 	if (unlikely(mrs->attempts > 0)) {
 		mrs->sample_skipped = 0;
-		mrs->cur_prob = MINSTREL_FRAC(mrs->success, mrs->attempts);
+		cur_prob = MINSTREL_FRAC(mrs->success, mrs->attempts);
 		if (unlikely(!mrs->att_hist)) {
-			mrs->prob_ewma = mrs->cur_prob;
+			mrs->prob_ewma = cur_prob;
 		} else {
 			/* update exponential weighted moving variance */
-			mrs->prob_ewmsd = minstrel_ewmsd(mrs->prob_ewmsd,
-							 mrs->cur_prob,
-							 mrs->prob_ewma,
-							 EWMA_LEVEL);
+			mrs->prob_ewmv = minstrel_ewmv(mrs->prob_ewmv,
+							cur_prob,
+							mrs->prob_ewma,
+							EWMA_LEVEL);
 
 			/*update exponential weighted moving avarage */
 			mrs->prob_ewma = minstrel_ewma(mrs->prob_ewma,
-						       mrs->cur_prob,
+						       cur_prob,
 						       EWMA_LEVEL);
 		}
 		mrs->att_hist += mrs->attempts;
@@ -262,9 +264,9 @@ minstrel_update_stats(struct minstrel_priv *mp, struct minstrel_sta_info *mi)
 
 static void
 minstrel_tx_status(void *priv, struct ieee80211_supported_band *sband,
-		   struct ieee80211_sta *sta, void *priv_sta,
-		   struct ieee80211_tx_info *info)
+		   void *priv_sta, struct ieee80211_tx_status *st)
 {
+	struct ieee80211_tx_info *info = st->info;
 	struct minstrel_priv *mp = priv;
 	struct minstrel_sta_info *mi = priv_sta;
 	struct ieee80211_tx_rate *ar = info->status.rates;
@@ -274,7 +276,7 @@ minstrel_tx_status(void *priv, struct ieee80211_supported_band *sband,
 	success = !!(info->flags & IEEE80211_TX_STAT_ACK);
 
 	for (i = 0; i < IEEE80211_TX_MAX_RATES; i++) {
-		if (ar[i].idx < 0)
+		if (ar[i].idx < 0 || !ar[i].count)
 			break;
 
 		ndx = rix_to_ndx(mi, ar[i].idx);
@@ -286,12 +288,6 @@ minstrel_tx_status(void *priv, struct ieee80211_supported_band *sband,
 		if ((i != IEEE80211_TX_MAX_RATES - 1) && (ar[i + 1].idx < 0))
 			mi->r[ndx].stats.success += success;
 	}
-
-	if ((info->flags & IEEE80211_TX_CTL_RATE_CTRL_PROBE) && (i >= 0))
-		mi->sample_packets++;
-
-	if (mi->sample_deferred > 0)
-		mi->sample_deferred--;
 
 	if (time_after(jiffies, mi->last_stats_update +
 				(mp->update_interval * HZ) / 1000))
@@ -365,8 +361,13 @@ minstrel_get_rate(void *priv, struct ieee80211_sta *sta,
 		return;
 #endif
 
+	/* Don't use EAPOL frames for sampling on non-mrr hw */
+	if (mp->hw->max_rates == 1 &&
+	    (info->control.flags & IEEE80211_TX_CTRL_PORT_CTRL_PROTO))
+		return;
+
 	delta = (mi->total_packets * sampling_ratio / 100) -
-			(mi->sample_packets + mi->sample_deferred / 2);
+			mi->sample_packets;
 
 	/* delta < 0: no sampling required */
 	prev_sample = mi->prev_sample;
@@ -375,7 +376,6 @@ minstrel_get_rate(void *priv, struct ieee80211_sta *sta,
 		return;
 
 	if (mi->total_packets >= 10000) {
-		mi->sample_deferred = 0;
 		mi->sample_packets = 0;
 		mi->total_packets = 0;
 	} else if (delta > mi->n_rates * 2) {
@@ -400,19 +400,8 @@ minstrel_get_rate(void *priv, struct ieee80211_sta *sta,
 	 * rate sampling method should be used.
 	 * Respect such rates that are not sampled for 20 interations.
 	 */
-	if (mrr_capable &&
-	    msr->perfect_tx_time > mr->perfect_tx_time &&
-	    msr->stats.sample_skipped < 20) {
-		/* Only use IEEE80211_TX_CTL_RATE_CTRL_PROBE to mark
-		 * packets that have the sampling rate deferred to the
-		 * second MRR stage. Increase the sample counter only
-		 * if the deferred sample rate was actually used.
-		 * Use the sample_deferred counter to make sure that
-		 * the sampling is not done in large bursts */
-		info->flags |= IEEE80211_TX_CTL_RATE_CTRL_PROBE;
-		rate++;
-		mi->sample_deferred++;
-	} else {
+	if (msr->perfect_tx_time < mr->perfect_tx_time ||
+	    msr->stats.sample_skipped >= 20) {
 		if (!msr->sample_limit)
 			return;
 
@@ -432,11 +421,12 @@ minstrel_get_rate(void *priv, struct ieee80211_sta *sta,
 
 	rate->idx = mi->r[ndx].rix;
 	rate->count = minstrel_get_retry_count(&mi->r[ndx], info);
+	info->flags |= IEEE80211_TX_CTL_RATE_CTRL_PROBE;
 }
 
 
 static void
-calc_rate_durations(enum ieee80211_band band,
+calc_rate_durations(enum nl80211_band band,
 		    struct minstrel_rate *d,
 		    struct ieee80211_rate *rate,
 		    struct cfg80211_chan_def *chandef)
@@ -579,7 +569,7 @@ minstrel_alloc_sta(void *priv, struct ieee80211_sta *sta, gfp_t gfp)
 	if (!mi)
 		return NULL;
 
-	for (i = 0; i < IEEE80211_NUM_BANDS; i++) {
+	for (i = 0; i < NUM_NL80211_BANDS; i++) {
 		sband = hw->wiphy->bands[i];
 		if (sband && sband->n_bitrates > max_rates)
 			max_rates = sband->n_bitrates;
@@ -621,7 +611,7 @@ minstrel_init_cck_rates(struct minstrel_priv *mp)
 	u32 rate_flags = ieee80211_chandef_rate_flags(&mp->hw->conf.chandef);
 	int i, j;
 
-	sband = mp->hw->wiphy->bands[IEEE80211_BAND_2GHZ];
+	sband = mp->hw->wiphy->bands[NL80211_BAND_2GHZ];
 	if (!sband)
 		return;
 
@@ -719,7 +709,7 @@ static u32 minstrel_get_expected_throughput(void *priv_sta)
 
 const struct rate_control_ops mac80211_minstrel = {
 	.name = "minstrel",
-	.tx_status_noskb = minstrel_tx_status,
+	.tx_status_ext = minstrel_tx_status,
 	.get_rate = minstrel_get_rate,
 	.rate_init = minstrel_rate_init,
 	.alloc = minstrel_alloc,

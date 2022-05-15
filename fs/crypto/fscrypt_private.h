@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * fscrypt_private.h
  *
@@ -11,9 +12,12 @@
 #ifndef _FSCRYPT_PRIVATE_H
 #define _FSCRYPT_PRIVATE_H
 
+#ifndef __FS_HAS_ENCRYPTION
 #define __FS_HAS_ENCRYPTION 1
+#endif
 #include <linux/fscrypt.h>
 #include <crypto/hash.h>
+#include <linux/pfk.h>
 
 /* Encryption parameters */
 #define FS_IV_SIZE			16
@@ -58,18 +62,25 @@ struct fscrypt_symlink_data {
 	char encrypted_path[1];
 } __packed;
 
+enum ci_mode_info {
+	CI_NONE_MODE = 0,
+	CI_DATA_MODE,
+	CI_FNAME_MODE,
+};
+
 /*
  * A pointer to this structure is stored in the file system's in-core
  * representation of an inode.
  */
 struct fscrypt_info {
+	u8 ci_mode;
 	u8 ci_data_mode;
 	u8 ci_filename_mode;
 	u8 ci_flags;
 	struct crypto_skcipher *ci_ctfm;
 	struct crypto_cipher *ci_essiv_tfm;
-	struct key	*ci_keyring_key;
 	u8 ci_master_key[FS_KEY_DESCRIPTOR_SIZE];
+	u8 ci_raw_key[FS_MAX_KEY_SIZE];
 };
 
 typedef enum {
@@ -79,17 +90,6 @@ typedef enum {
 
 #define FS_CTX_REQUIRES_FREE_ENCRYPT_FL		0x00000001
 #define FS_CTX_HAS_BOUNCE_BUFFER_FL		0x00000002
-
-/* bio stuffs */
-#define REQ_OP_READ	READ
-#define REQ_OP_WRITE	WRITE
-#define bio_op(bio)	((bio)->bi_rw & 1)
-
-static inline void bio_set_op_attrs(struct bio *bio, unsigned op,
-		unsigned op_flags)
-{
-	bio->bi_rw = op | op_flags;
-}
 
 static inline bool fscrypt_valid_enc_modes(u32 contents_mode,
 					   u32 filenames_mode)
@@ -106,7 +106,17 @@ static inline bool fscrypt_valid_enc_modes(u32 contents_mode,
 	    filenames_mode == FS_ENCRYPTION_MODE_SPECK128_256_CTS)
 		return true;
 
+	if (contents_mode == FS_ENCRYPTION_MODE_PRIVATE &&
+	    filenames_mode == FS_ENCRYPTION_MODE_AES_256_CTS)
+		return true;
+
 	return false;
+}
+
+static inline bool is_private_data_mode(struct fscrypt_info *ci)
+{
+	return ci->ci_mode == CI_DATA_MODE &&
+		ci->ci_data_mode == FS_ENCRYPTION_MODE_PRIVATE;
 }
 
 /* crypto.c */
@@ -130,8 +140,5 @@ extern bool fscrypt_fname_encrypted_size(const struct inode *inode,
 
 /* keyinfo.c */
 extern void __exit fscrypt_essiv_cleanup(void);
-
-/* policy.c */
-extern u8 fscrypt_data_crypt_mode(u8 mode);
 
 #endif /* _FSCRYPT_PRIVATE_H */

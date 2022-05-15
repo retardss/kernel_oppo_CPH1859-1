@@ -18,7 +18,7 @@
 #include <linux/kallsyms.h>
 #include <linux/nmi.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "tick-internal.h"
 
@@ -63,21 +63,11 @@ static void
 print_timer(struct seq_file *m, struct hrtimer *taddr, struct hrtimer *timer,
 	    int idx, u64 now)
 {
-#ifdef CONFIG_TIMER_STATS
-	char tmp[TASK_COMM_LEN + 1];
-#endif
 	SEQ_printf(m, " #%d: ", idx);
 	print_name_offset(m, taddr);
 	SEQ_printf(m, ", ");
 	print_name_offset(m, timer->function);
 	SEQ_printf(m, ", S:%02x", timer->state);
-#ifdef CONFIG_TIMER_STATS
-	SEQ_printf(m, ", ");
-	print_name_offset(m, timer->start_site);
-	memcpy(tmp, timer->start_comm, TASK_COMM_LEN);
-	tmp[TASK_COMM_LEN] = 0;
-	SEQ_printf(m, ", %s/%d", tmp, timer->start_pid);
-#endif
 	SEQ_printf(m, "\n");
 	SEQ_printf(m, " # expires at %Lu-%Lu nsecs [in %Ld to %Ld nsecs]\n",
 		(unsigned long long)ktime_to_ns(hrtimer_get_softexpires(timer)),
@@ -131,7 +121,7 @@ print_base(struct seq_file *m, struct hrtimer_clock_base *base, u64 now)
 	SEQ_printf(m, "  .base:       %pK\n", base);
 	SEQ_printf(m, "  .index:      %d\n", base->index);
 
-	SEQ_printf(m, "  .resolution: %u nsecs\n", (unsigned) hrtimer_resolution);
+	SEQ_printf(m, "  .resolution: %u nsecs\n", hrtimer_resolution);
 
 	SEQ_printf(m,   "  .get_time:   ");
 	print_name_offset(m, base->get_time);
@@ -299,23 +289,6 @@ static inline void timer_list_header(struct seq_file *m, u64 now)
 	SEQ_printf(m, "\n");
 }
 
-static int timer_list_show(struct seq_file *m, void *v)
-{
-	struct timer_list_iter *iter = v;
-
-	if (iter->cpu == -1 && !iter->second_pass)
-		timer_list_header(m, iter->now);
-	else if (!iter->second_pass)
-		print_cpu(m, iter->cpu, iter->now);
-#ifdef CONFIG_GENERIC_CLOCKEVENTS
-	else if (iter->cpu == -1 && iter->second_pass)
-		timer_list_show_tickdevices_header(m);
-	else
-		print_tickdevice(m, tick_get_device(iter->cpu), iter->cpu);
-#endif
-	return 0;
-}
-
 void sysrq_timer_list_show(void)
 {
 	u64 now = ktime_to_ns(ktime_get());
@@ -332,6 +305,24 @@ void sysrq_timer_list_show(void)
 		print_tickdevice(NULL, tick_get_device(cpu), cpu);
 #endif
 	return;
+}
+
+#ifdef CONFIG_PROC_FS
+static int timer_list_show(struct seq_file *m, void *v)
+{
+	struct timer_list_iter *iter = v;
+
+	if (iter->cpu == -1 && !iter->second_pass)
+		timer_list_header(m, iter->now);
+	else if (!iter->second_pass)
+		print_cpu(m, iter->cpu, iter->now);
+#ifdef CONFIG_GENERIC_CLOCKEVENTS
+	else if (iter->cpu == -1 && iter->second_pass)
+		timer_list_show_tickdevices_header(m);
+	else
+		print_tickdevice(m, tick_get_device(iter->cpu), iter->cpu);
+#endif
+	return 0;
 }
 
 static void *move_iter(struct timer_list_iter *iter, loff_t offset)
@@ -399,9 +390,10 @@ static int __init init_timer_list_procfs(void)
 {
 	struct proc_dir_entry *pe;
 
-	pe = proc_create("timer_list", 0444, NULL, &timer_list_fops);
+	pe = proc_create("timer_list", 0400, NULL, &timer_list_fops);
 	if (!pe)
 		return -ENOMEM;
 	return 0;
 }
 __initcall(init_timer_list_procfs);
+#endif

@@ -13,7 +13,7 @@
 #include <linux/slab.h>
 #include "internal.h"
 
-struct proc_dir_entry *proc_uid;
+static struct proc_dir_entry *proc_uid;
 
 #define UID_HASH_BITS 10
 
@@ -84,7 +84,7 @@ struct uid_entry {
 }
 
 #ifdef CONFIG_CPU_FREQ_TIMES
-const struct file_operations proc_uid_time_in_state_operations = {
+static const struct file_operations proc_uid_time_in_state_operations = {
 	.open		= single_uid_time_in_state_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -98,11 +98,11 @@ static const struct uid_entry uid_base_stuff[] = {
 #endif
 };
 
-const struct inode_operations proc_uid_def_inode_operations = {
+static const struct inode_operations proc_uid_def_inode_operations = {
 	.setattr	= proc_setattr,
 };
 
-struct inode *proc_uid_make_inode(struct super_block *sb, kuid_t kuid)
+static struct inode *proc_uid_make_inode(struct super_block *sb, kuid_t kuid)
 {
 	struct inode *inode;
 
@@ -111,7 +111,7 @@ struct inode *proc_uid_make_inode(struct super_block *sb, kuid_t kuid)
 		return NULL;
 
 	inode->i_ino = get_next_ino();
-	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
+	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
 	inode->i_op = &proc_uid_def_inode_operations;
 	inode->i_uid = kuid;
 

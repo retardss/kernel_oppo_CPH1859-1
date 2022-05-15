@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014,2016 The Linux Foundation. All rights reserved.
  * Copyright (C) 2013 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
  *
@@ -105,6 +105,12 @@ static const struct mdp_format formats[] = {
 			MDP_PLANE_INTERLEAVED, CHROMA_FULL, false),
 	FMT(XRGB8888, 8, 8, 8, 8,  1, 0, 2, 3,  false,  true,  4,  4,
 			MDP_PLANE_INTERLEAVED, CHROMA_FULL, false),
+	FMT(XBGR8888, 8, 8, 8, 8,  2, 0, 1, 3,  false,   true,  4,  4,
+			MDP_PLANE_INTERLEAVED, CHROMA_FULL, false),
+	FMT(RGBX8888, 8, 8, 8, 8,  3, 1, 0, 2,  false,   true,  4,  4,
+			MDP_PLANE_INTERLEAVED, CHROMA_FULL, false),
+	FMT(BGRX8888, 8, 8, 8, 8,  3, 2, 0, 1,  false,   true,  4,  4,
+			MDP_PLANE_INTERLEAVED, CHROMA_FULL, false),
 	FMT(RGB888,   0, 8, 8, 8,  1, 0, 2, 0,  false,  true,  3,  3,
 			MDP_PLANE_INTERLEAVED, CHROMA_FULL, false),
 	FMT(BGR888,   0, 8, 8, 8,  2, 0, 1, 0,  false,  true,  3,  3,
@@ -165,7 +171,10 @@ uint32_t mdp_get_formats(uint32_t *pixel_formats, uint32_t max_formats,
 	return i;
 }
 
-const struct msm_format *mdp_get_format(struct msm_kms *kms, uint32_t format)
+const struct msm_format *mdp_get_format(
+		struct msm_kms *kms,
+		uint32_t format,
+		const uint64_t modifier)
 {
 	int i;
 	for (i = 0; i < ARRAY_SIZE(formats); i++) {

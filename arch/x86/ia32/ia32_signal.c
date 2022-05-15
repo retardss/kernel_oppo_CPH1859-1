@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/x86_64/ia32/ia32_signal.c
  *
@@ -9,6 +10,7 @@
  */
 
 #include <linux/sched.h>
+#include <linux/sched/task_stack.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/kernel.h>
@@ -20,7 +22,7 @@
 #include <linux/compat.h>
 #include <linux/binfmts.h>
 #include <asm/ucontext.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/fpu/internal.h>
 #include <asm/fpu/signal.h>
 #include <asm/ptrace.h>
@@ -60,9 +62,8 @@
 } while (0)
 
 #define RELOAD_SEG(seg)		{		\
-	unsigned int pre = GET_SEG(seg);	\
+	unsigned int pre = (seg) | 3;		\
 	unsigned int cur = get_user_seg(seg);	\
-	pre |= 3;				\
 	if (pre != cur)				\
 		set_user_seg(seg, pre);		\
 }
@@ -71,6 +72,7 @@ static int ia32_restore_sigcontext(struct pt_regs *regs,
 				   struct sigcontext_32 __user *sc)
 {
 	unsigned int tmpflags, err = 0;
+	u16 gs, fs, es, ds;
 	void __user *buf;
 	u32 tmp;
 
@@ -78,16 +80,10 @@ static int ia32_restore_sigcontext(struct pt_regs *regs,
 	current->restart_block.fn = do_no_restart_syscall;
 
 	get_user_try {
-		/*
-		 * Reload fs and gs if they have changed in the signal
-		 * handler.  This does not handle long fs/gs base changes in
-		 * the handler, but does not clobber them at least in the
-		 * normal case.
-		 */
-		RELOAD_SEG(gs);
-		RELOAD_SEG(fs);
-		RELOAD_SEG(ds);
-		RELOAD_SEG(es);
+		gs = GET_SEG(gs);
+		fs = GET_SEG(fs);
+		ds = GET_SEG(ds);
+		es = GET_SEG(es);
 
 		COPY(di); COPY(si); COPY(bp); COPY(sp); COPY(bx);
 		COPY(dx); COPY(cx); COPY(ip); COPY(ax);
@@ -104,6 +100,17 @@ static int ia32_restore_sigcontext(struct pt_regs *regs,
 		get_user_ex(tmp, &sc->fpstate);
 		buf = compat_ptr(tmp);
 	} get_user_catch(err);
+
+	/*
+	 * Reload fs and gs if they have changed in the signal
+	 * handler.  This does not handle long fs/gs base changes in
+	 * the handler, but does not clobber them at least in the
+	 * normal case.
+	 */
+	RELOAD_SEG(gs);
+	RELOAD_SEG(fs);
+	RELOAD_SEG(ds);
+	RELOAD_SEG(es);
 
 	err |= fpu__restore_sig(buf, 1);
 
@@ -225,12 +232,12 @@ static void __user *get_sigframe(struct ksignal *ksig, struct pt_regs *regs,
 	if (ksig->ka.sa.sa_flags & SA_ONSTACK)
 		sp = sigsp(sp, ksig);
 	/* This is the legacy signal stack switching. */
-	else if ((regs->ss & 0xffff) != __USER32_DS &&
+	else if (regs->ss != __USER32_DS &&
 		!(ksig->ka.sa.sa_flags & SA_RESTORER) &&
 		 ksig->ka.sa.sa_restorer)
 		sp = (unsigned long) ksig->ka.sa.sa_restorer;
 
-	if (fpu->fpstate_active) {
+	if (fpu->initialized) {
 		unsigned long fx_aligned, math_size;
 
 		sp = fpu__alloc_mathframe(sp, 1, &fx_aligned, &math_size);
@@ -357,7 +364,7 @@ int ia32_setup_rt_frame(int sig, struct ksignal *ksig,
 		put_user_ex(ptr_to_compat(&frame->uc), &frame->puc);
 
 		/* Create the ucontext.  */
-		if (cpu_has_xsave)
+		if (boot_cpu_has(X86_FEATURE_XSAVE))
 			put_user_ex(UC_FP_XSTATE, &frame->uc.uc_flags);
 		else
 			put_user_ex(0, &frame->uc.uc_flags);
@@ -378,7 +385,7 @@ int ia32_setup_rt_frame(int sig, struct ksignal *ksig,
 		put_user_ex(*((u64 *)&code), (u64 __user *)frame->retcode);
 	} put_user_catch(err);
 
-	err |= copy_siginfo_to_user32(&frame->info, &ksig->info);
+	err |= __copy_siginfo_to_user32(&frame->info, &ksig->info, false);
 	err |= ia32_setup_sigcontext(&frame->uc.uc_mcontext, fpstate,
 				     regs, set->sig[0]);
 	err |= __copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set));

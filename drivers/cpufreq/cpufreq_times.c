@@ -15,9 +15,9 @@
 
 #include <linux/cpufreq.h>
 #include <linux/cpufreq_times.h>
-#include <linux/cputime.h>
 #include <linux/hashtable.h>
 #include <linux/init.h>
+#include <linux/jiffies.h>
 #include <linux/proc_fs.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
@@ -27,7 +27,7 @@
 
 #define UID_HASH_BITS 10
 
-DECLARE_HASHTABLE(uid_hash_table, UID_HASH_BITS);
+static DECLARE_HASHTABLE(uid_hash_table, UID_HASH_BITS);
 
 static DEFINE_SPINLOCK(task_time_in_state_lock); /* task->time_in_state */
 static DEFINE_SPINLOCK(uid_lock); /* uid_hash_table */
@@ -161,7 +161,7 @@ static int single_uid_time_in_state_show(struct seq_file *m, void *ptr)
 	for (i = 0; i < uid_entry->max_state; ++i) {
 		if (freq_index_invalid(i))
 			continue;
-		time = cputime_to_clock_t(uid_entry->time_in_state[i]);
+		time = nsec_to_clock_t(uid_entry->time_in_state[i]);
 		seq_write(m, &time, sizeof(time));
 	}
 
@@ -221,7 +221,7 @@ static int uid_time_in_state_seq_show(struct seq_file *m, void *v)
 		for (i = 0; i < uid_entry->max_state; ++i) {
 			if (freq_index_invalid(i))
 				continue;
-			seq_printf(m, " %lu", (unsigned long)cputime_to_clock_t(
+			seq_printf(m, " %lu", (unsigned long)nsec_to_clock_t(
 					   uid_entry->time_in_state[i]));
 		}
 		if (uid_entry->max_state)
@@ -294,7 +294,7 @@ int proc_time_in_state_show(struct seq_file *m, struct pid_namespace *ns,
 	struct pid *pid, struct task_struct *p)
 {
 	unsigned int cpu, i;
-	cputime_t cputime;
+	u64 cputime;
 	unsigned long flags;
 	struct cpu_freqs *freqs;
 	struct cpu_freqs *last_freqs = NULL;
@@ -315,14 +315,14 @@ int proc_time_in_state_show(struct seq_file *m, struct pid_namespace *ns,
 			    p->time_in_state)
 				cputime = p->time_in_state[freqs->offset + i];
 			seq_printf(m, "%u %lu\n", freqs->freq_table[i],
-				   (unsigned long)cputime_to_clock_t(cputime));
+				   (unsigned long)nsec_to_clock_t(cputime));
 		}
 	}
 	spin_unlock_irqrestore(&task_time_in_state_lock, flags);
 	return 0;
 }
 
-void cpufreq_acct_update_power(struct task_struct *p, cputime_t cputime)
+void cpufreq_acct_update_power(struct task_struct *p, u64 cputime)
 {
 	unsigned long flags;
 	unsigned int state;
@@ -359,7 +359,7 @@ void cpufreq_times_create_policy(struct cpufreq_policy *policy)
 	if (all_freqs[policy->cpu])
 		return;
 
-	table = cpufreq_frequency_get_table(policy->cpu);
+	table = policy->freq_table;
 	if (!table)
 		return;
 

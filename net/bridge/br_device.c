@@ -19,7 +19,7 @@
 #include <linux/list.h>
 #include <linux/netfilter_bridge.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include "br_private.h"
 
 #define COMMON_FEATURES (NETIF_F_SG | NETIF_F_FRAGLIST | NETIF_F_HIGHDMA | \
@@ -34,11 +34,11 @@ static struct lock_class_key bridge_netdev_addr_lock_key;
 netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_bridge *br = netdev_priv(dev);
-	const unsigned char *dest = skb->data;
 	struct net_bridge_fdb_entry *dst;
 	struct net_bridge_mdb_entry *mdst;
 	struct pcpu_sw_netstats *brstats = this_cpu_ptr(br->stats);
 	const struct nf_br_ops *nf_ops;
+	const unsigned char *dest;
 	u16 vid = 0;
 
 	rcu_read_lock();
@@ -48,6 +48,12 @@ netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 		return NETDEV_TX_OK;
 	}
 
+	u64_stats_update_begin(&brstats->syncp);
+	brstats->tx_packets++;
+	brstats->tx_bytes += skb->len;
+	u64_stats_update_end(&brstats->syncp);
+
+	br_switchdev_frame_unmark(skb);
 	BR_INPUT_SKB_CB(skb)->brdev = dev;
 
 	skb_reset_mac_header(skb);
@@ -62,11 +68,12 @@ netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (!br_allowed_ingress(br, br_vlan_group_rcu(br), skb, &vid))
 		goto out;
 
-	if (is_broadcast_ether_addr(dest))
-		br_flood_deliver(br, skb, false);
-	else if (is_multicast_ether_addr(dest)) {
+	dest = eth_hdr(skb)->h_dest;
+	if (is_broadcast_ether_addr(dest)) {
+		br_flood(br, skb, BR_PKT_BROADCAST, false, true);
+	} else if (is_multicast_ether_addr(dest)) {
 		if (unlikely(netpoll_tx_running(dev))) {
-			br_flood_deliver(br, skb, false);
+			br_flood(br, skb, BR_PKT_MULTICAST, false, true);
 			goto out;
 		}
 		if (br_multicast_rcv(br, NULL, skb, vid)) {
@@ -77,14 +84,14 @@ netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 		mdst = br_mdb_get(br, skb, vid);
 		if ((mdst || BR_INPUT_SKB_CB_MROUTERS_ONLY(skb)) &&
 		    br_multicast_querier_exists(br, eth_hdr(skb)))
-			br_multicast_deliver(mdst, skb);
+			br_multicast_flood(mdst, skb, false, true);
 		else
-			br_flood_deliver(br, skb, false);
-	} else if ((dst = __br_fdb_get(br, dest, vid)) != NULL)
-		br_deliver(dst->dst, skb);
-	else
-		br_flood_deliver(br, skb, true);
-
+			br_flood(br, skb, BR_PKT_MULTICAST, false, true);
+	} else if ((dst = br_fdb_find_rcu(br, dest, vid)) != NULL) {
+		br_forward(dst->dst, skb, false, true);
+	} else {
+		br_flood(br, skb, BR_PKT_UNICAST, false, true);
+	}
 out:
 	rcu_read_unlock();
 	return NETDEV_TX_OK;
@@ -105,11 +112,29 @@ static int br_dev_init(struct net_device *dev)
 		return -ENOMEM;
 
 	err = br_vlan_init(br);
-	if (err)
+	if (err) {
 		free_percpu(br->stats);
+		return err;
+	}
+
+	err = br_multicast_init_stats(br);
+	if (err) {
+		free_percpu(br->stats);
+		br_vlan_flush(br);
+	}
 	br_set_lockdep_class(dev);
 
 	return err;
+}
+
+static void br_dev_uninit(struct net_device *dev)
+{
+	struct net_bridge *br = netdev_priv(dev);
+
+	br_multicast_dev_del(br);
+	br_multicast_uninit_stats(br);
+	br_vlan_flush(br);
+	free_percpu(br->stats);
 }
 
 static int br_dev_open(struct net_device *dev)
@@ -146,8 +171,8 @@ static int br_dev_stop(struct net_device *dev)
 	return 0;
 }
 
-static struct rtnl_link_stats64 *br_get_stats64(struct net_device *dev,
-						struct rtnl_link_stats64 *stats)
+static void br_get_stats64(struct net_device *dev,
+			   struct rtnl_link_stats64 *stats)
 {
 	struct net_bridge *br = netdev_priv(dev);
 	struct pcpu_sw_netstats tmp, sum = { 0 };
@@ -167,18 +192,17 @@ static struct rtnl_link_stats64 *br_get_stats64(struct net_device *dev,
 		sum.rx_packets += tmp.rx_packets;
 	}
 
+	netdev_stats_to_stats64(stats, &dev->stats);
 	stats->tx_bytes   = sum.tx_bytes;
 	stats->tx_packets = sum.tx_packets;
 	stats->rx_bytes   = sum.rx_bytes;
 	stats->rx_packets = sum.rx_packets;
-
-	return stats;
 }
 
 static int br_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct net_bridge *br = netdev_priv(dev);
-	if (new_mtu < 68 || new_mtu > br_min_mtu(br))
+	if (new_mtu > br_min_mtu(br))
 		return -EINVAL;
 
 	dev->mtu = new_mtu;
@@ -199,6 +223,12 @@ static int br_set_mac_address(struct net_device *dev, void *p)
 
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EADDRNOTAVAIL;
+
+	/* dev_set_mac_addr() can be called by a master device on bridge's
+	 * NETDEV_UNREGISTER, but since it's being destroyed do nothing
+	 */
+	if (dev->reg_state != NETREG_REGISTERED)
+		return -EBUSY;
 
 	spin_lock_bh(&br->lock);
 	if (!ether_addr_equal(dev->dev_addr, addr->sa_data)) {
@@ -327,6 +357,7 @@ static const struct net_device_ops br_netdev_ops = {
 	.ndo_open		 = br_dev_open,
 	.ndo_stop		 = br_dev_stop,
 	.ndo_init		 = br_dev_init,
+	.ndo_uninit		 = br_dev_uninit,
 	.ndo_start_xmit		 = br_dev_xmit,
 	.ndo_get_stats64	 = br_get_stats64,
 	.ndo_set_mac_address	 = br_set_mac_address,
@@ -351,14 +382,6 @@ static const struct net_device_ops br_netdev_ops = {
 	.ndo_features_check	 = passthru_features_check,
 };
 
-static void br_dev_free(struct net_device *dev)
-{
-	struct net_bridge *br = netdev_priv(dev);
-
-	free_percpu(br->stats);
-	free_netdev(dev);
-}
-
 static struct device_type br_type = {
 	.name	= "bridge",
 };
@@ -371,7 +394,7 @@ void br_dev_setup(struct net_device *dev)
 	ether_setup(dev);
 
 	dev->netdev_ops = &br_netdev_ops;
-	dev->destructor = br_dev_free;
+	dev->needs_free_netdev = true;
 	dev->ethtool_ops = &br_ethtool_ops;
 	SET_NETDEV_DEVTYPE(dev, &br_type);
 	dev->priv_flags = IFF_EBRIDGE | IFF_NO_QUEUE;
@@ -400,9 +423,11 @@ void br_dev_setup(struct net_device *dev)
 	br->bridge_max_age = br->max_age = 20 * HZ;
 	br->bridge_hello_time = br->hello_time = 2 * HZ;
 	br->bridge_forward_delay = br->forward_delay = 15 * HZ;
-	br->ageing_time = BR_DEFAULT_AGEING_TIME;
+	br->bridge_ageing_time = br->ageing_time = BR_DEFAULT_AGEING_TIME;
+	dev->max_mtu = ETH_MAX_MTU;
 
 	br_netfilter_rtable_init(br);
 	br_stp_timer_init(br);
 	br_multicast_init(br);
+	INIT_DELAYED_WORK(&br->gc_work, br_fdb_cleanup);
 }

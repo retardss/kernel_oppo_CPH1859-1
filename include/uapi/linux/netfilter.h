@@ -1,9 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI__LINUX_NETFILTER_H
 #define _UAPI__LINUX_NETFILTER_H
 
 #include <linux/types.h>
 #include <linux/compiler.h>
-#include <linux/sysctl.h>
 #include <linux/in.h>
 #include <linux/in6.h>
 
@@ -13,10 +13,7 @@
 #define NF_STOLEN 2
 #define NF_QUEUE 3
 #define NF_REPEAT 4
-#define NF_STOP 5
-#ifndef VENDOR_EDIT
-//Junyuan.Huang@PSW.CN.WiFi.Network.1471780, 2018/06/26,
-//Modify for limit speed function
+#define NF_STOP 5	/* Deprecated, for userspace nf_queue compatibility. */
 #define NF_MAX_VERDICT NF_STOP
 #else /* VENDOR_EDIT */
 #if defined(CONFIG_IMQ) || defined(CONFIG_IMQ_MODULE)

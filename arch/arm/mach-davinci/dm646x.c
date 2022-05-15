@@ -9,6 +9,7 @@
  * or implied.
  */
 #include <linux/dma-mapping.h>
+#include <linux/dmaengine.h>
 #include <linux/init.h>
 #include <linux/clk.h>
 #include <linux/serial_8250.h>
@@ -20,7 +21,7 @@
 
 #include <mach/cputype.h>
 #include <mach/irqs.h>
-#include <mach/psc.h>
+#include "psc.h"
 #include <mach/mux.h>
 #include <mach/time.h>
 #include <mach/serial.h>
@@ -494,7 +495,8 @@ static u8 dm646x_default_priorities[DAVINCI_N_AINTC_IRQ] = {
 	[IRQ_DM646X_MCASP0TXINT]        = 7,
 	[IRQ_DM646X_MCASP0RXINT]        = 7,
 	[IRQ_DM646X_RESERVED_3]         = 7,
-	[IRQ_DM646X_MCASP1TXINT]        = 7,    /* clockevent */
+	[IRQ_DM646X_MCASP1TXINT]        = 7,
+	[IRQ_TINT0_TINT12]              = 7,    /* clockevent */
 	[IRQ_TINT0_TINT34]              = 7,    /* clocksource */
 	[IRQ_TINT1_TINT12]              = 7,    /* DSP timer */
 	[IRQ_TINT1_TINT34]              = 7,    /* system tick */
@@ -540,9 +542,19 @@ static s8 dm646x_queue_priority_mapping[][2] = {
 	{-1, -1},
 };
 
+static const struct dma_slave_map dm646x_edma_map[] = {
+	{ "davinci-mcasp.0", "tx", EDMA_FILTER_PARAM(0, 6) },
+	{ "davinci-mcasp.0", "rx", EDMA_FILTER_PARAM(0, 9) },
+	{ "davinci-mcasp.1", "tx", EDMA_FILTER_PARAM(0, 12) },
+	{ "spi_davinci", "tx", EDMA_FILTER_PARAM(0, 16) },
+	{ "spi_davinci", "rx", EDMA_FILTER_PARAM(0, 17) },
+};
+
 static struct edma_soc_info dm646x_edma_pdata = {
 	.queue_priority_mapping	= dm646x_queue_priority_mapping,
 	.default_queue		= EVENTQ_1,
+	.slave_map		= dm646x_edma_map,
+	.slavecnt		= ARRAY_SIZE(dm646x_edma_map),
 };
 
 static struct resource edma_resources[] = {
@@ -945,6 +957,7 @@ void __init dm646x_init(void)
 {
 	davinci_common_init(&davinci_soc_info_dm646x);
 	davinci_map_sysmod();
+	davinci_clk_init(davinci_soc_info_dm646x.cpu_clks);
 }
 
 static int __init dm646x_init_devices(void)

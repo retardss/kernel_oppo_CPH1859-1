@@ -29,7 +29,7 @@
 #include <linux/pci.h>
 #include <linux/string.h>
 #include <linux/fs.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/wait.h>
 #include <linux/delay.h>
 #include <linux/atomic.h>
@@ -782,6 +782,8 @@ static int genwqe_pin_mem(struct genwqe_file *cfile, struct genwqe_mem *m)
 
 	if ((m->addr == 0x0) || (m->size == 0))
 		return -EINVAL;
+	if (m->size > ULONG_MAX - PAGE_SIZE - (m->addr & ~PAGE_MASK))
+		return -EINVAL;
 
 	map_addr = (m->addr & PAGE_MASK);
 	map_size = round_up(m->size + (m->addr & ~PAGE_MASK), PAGE_SIZE);
@@ -1397,7 +1399,7 @@ int genwqe_device_remove(struct genwqe_dev *cd)
 	 * application which will decrease this reference from
 	 * 1/unused to 0/illegal and not from 2/used 1/empty.
 	 */
-	rc = atomic_read(&cd->cdev_genwqe.kobj.kref.refcount);
+	rc = kref_read(&cd->cdev_genwqe.kobj.kref);
 	if (rc != 1) {
 		dev_err(&pci_dev->dev,
 			"[%s] err: cdev_genwqe...refcount=%d\n", __func__, rc);

@@ -102,7 +102,7 @@ struct ipmi_user {
 	struct kref refcount;
 
 	/* The upper layer that handles receive messages. */
-	struct ipmi_user_hndl *handler;
+	const struct ipmi_user_hndl *handler;
 	void             *handler_data;
 
 	/* The interface this user is bound to. */
@@ -158,15 +158,16 @@ struct seq_table {
  * Store the information in a msgid (long) to allow us to find a
  * sequence table entry from the msgid.
  */
-#define STORE_SEQ_IN_MSGID(seq, seqid) (((seq&0xff)<<26) | (seqid&0x3ffffff))
+#define STORE_SEQ_IN_MSGID(seq, seqid) \
+	((((seq) & 0x3f) << 26) | ((seqid) & 0x3ffffff))
 
 #define GET_SEQ_FROM_MSGID(msgid, seq, seqid) \
 	do {								\
-		seq = ((msgid >> 26) & 0x3f);				\
-		seqid = (msgid & 0x3fffff);				\
+		seq = (((msgid) >> 26) & 0x3f);				\
+		seqid = ((msgid) & 0x3ffffff);				\
 	} while (0)
 
-#define NEXT_SEQID(seqid) (((seqid) + 1) & 0x3fffff)
+#define NEXT_SEQID(seqid) (((seqid) + 1) & 0x3ffffff)
 
 struct ipmi_channel {
 	unsigned char medium;
@@ -472,13 +473,14 @@ static DEFINE_MUTEX(smi_watchers_mutex);
 #define ipmi_get_stat(intf, stat) \
 	((unsigned int) atomic_read(&(intf)->stats[IPMI_STAT_ ## stat]))
 
-static char *addr_src_to_str[] = { "invalid", "hotmod", "hardcoded", "SPMI",
-				   "ACPI", "SMBIOS", "PCI",
-				   "device-tree", "default" };
+static const char * const addr_src_to_str[] = {
+	"invalid", "hotmod", "hardcoded", "SPMI", "ACPI", "SMBIOS", "PCI",
+	"device-tree"
+};
 
 const char *ipmi_addr_src_to_str(enum ipmi_addr_src src)
 {
-	if (src > SI_DEFAULT)
+	if (src >= SI_LAST)
 		src = 0; /* Invalid */
 	return addr_src_to_str[src];
 }
@@ -917,7 +919,7 @@ static int intf_err_seq(ipmi_smi_t   intf,
 
 
 int ipmi_create_user(unsigned int          if_num,
-		     struct ipmi_user_hndl *handler,
+		     const struct ipmi_user_hndl *handler,
 		     void                  *handler_data,
 		     ipmi_user_t           *user)
 {
@@ -2395,7 +2397,7 @@ static umode_t bmc_dev_attr_is_visible(struct kobject *kobj,
 	return mode;
 }
 
-static struct attribute_group bmc_dev_attr_group = {
+static const struct attribute_group bmc_dev_attr_group = {
 	.attrs		= bmc_dev_attrs,
 	.is_visible	= bmc_dev_attr_is_visible,
 };
@@ -2405,7 +2407,7 @@ static const struct attribute_group *bmc_dev_attr_groups[] = {
 	NULL
 };
 
-static struct device_type bmc_device_type = {
+static const struct device_type bmc_device_type = {
 	.groups		= bmc_dev_attr_groups,
 };
 
@@ -2645,7 +2647,9 @@ get_guid(ipmi_smi_t intf)
 	if (rv)
 		/* Send failed, no GUID available. */
 		intf->bmc->guid_set = 0;
-	wait_event(intf->waitq, intf->bmc->guid_set != 2);
+	else
+		wait_event(intf->waitq, intf->bmc->guid_set != 2);
+
 	intf->null_user_handler = NULL;
 }
 
@@ -2890,10 +2894,10 @@ int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
 		intf->curr_channel = IPMI_MAX_CHANNELS;
 	}
 
+	rv = ipmi_bmc_register(intf, i);
+
 	if (rv == 0)
 		rv = add_proc_entries(intf, i);
-
-	rv = ipmi_bmc_register(intf, i);
 
  out:
 	if (rv) {
@@ -2981,8 +2985,6 @@ int ipmi_unregister_smi(ipmi_smi_t intf)
 	int intf_num = intf->intf_num;
 	ipmi_user_t user;
 
-	ipmi_bmc_unregister(intf);
-
 	mutex_lock(&smi_watchers_mutex);
 	mutex_lock(&ipmi_interfaces_mutex);
 	intf->intf_num = -1;
@@ -3006,6 +3008,7 @@ int ipmi_unregister_smi(ipmi_smi_t intf)
 	mutex_unlock(&ipmi_interfaces_mutex);
 
 	remove_proc_entries(intf);
+	ipmi_bmc_unregister(intf);
 
 	/*
 	 * Call all the watcher interfaces to tell them that
@@ -4652,3 +4655,4 @@ MODULE_AUTHOR("Corey Minyard <minyard@mvista.com>");
 MODULE_DESCRIPTION("Incoming and outgoing message routing for an IPMI"
 		   " interface.");
 MODULE_VERSION(IPMI_DRIVER_VERSION);
+MODULE_SOFTDEP("post: ipmi_devintf");

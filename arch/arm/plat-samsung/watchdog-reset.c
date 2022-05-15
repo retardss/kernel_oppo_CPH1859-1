@@ -3,7 +3,7 @@
  * Copyright (c) 2008 Simtec Electronics
  *	Ben Dooks <ben@simtec.co.uk>
  *
- * Coyright (c) 2013 Tomasz Figa <tomasz.figa@gmail.com>
+ * Copyright (c) 2013 Tomasz Figa <tomasz.figa@gmail.com>
  *
  * Watchdog reset support for Samsung SoCs.
  *
@@ -67,6 +67,7 @@ void samsung_wdt_reset(void)
 #ifdef CONFIG_OF
 static const struct of_device_id s3c2410_wdt_match[] = {
 	{ .compatible = "samsung,s3c2410-wdt" },
+	{ .compatible = "samsung,s3c6410-wdt" },
 	{},
 };
 

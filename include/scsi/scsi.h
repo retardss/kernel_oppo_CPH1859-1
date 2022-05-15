@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This header file contains public constants and structures used by
  * the SCSI initiator code.
@@ -8,6 +9,7 @@
 #include <linux/types.h>
 #include <linux/scatterlist.h>
 #include <linux/kernel.h>
+#include <linux/device.h>
 #include <scsi/scsi_common.h>
 #include <scsi/scsi_proto.h>
 
@@ -16,25 +18,6 @@ struct scsi_cmnd;
 enum scsi_timeouts {
 	SCSI_DEFAULT_EH_TIMEOUT		= 10 * HZ,
 };
-
-/*
- * The maximum number of SG segments that we will put inside a
- * scatterlist (unless chaining is used). Should ideally fit inside a
- * single page, to avoid a higher order allocation.  We could define this
- * to SG_MAX_SINGLE_ALLOC to pack correctly at the highest order.  The
- * minimum value is 32
- */
-#define SCSI_MAX_SG_SEGMENTS	128
-
-/*
- * Like SCSI_MAX_SG_SEGMENTS, but for archs that have sg chaining. This limit
- * is totally arbitrary, a setting of 2048 will get you at least 8mb ios.
- */
-#ifdef CONFIG_ARCH_HAS_SG_CHAIN
-#define SCSI_MAX_SG_CHAIN_SEGMENTS	2048
-#else
-#define SCSI_MAX_SG_CHAIN_SEGMENTS	SCSI_MAX_SG_SEGMENTS
-#endif
 
 /*
  * DIX-capable adapters effectively support infinite chaining for the
@@ -47,16 +30,6 @@ enum scsi_timeouts {
  * possible channels, (target) ids, or luns on a given shost.
  */
 #define SCAN_WILD_CARD	~0
-
-#ifdef CONFIG_ACPI
-struct acpi_bus_type;
-
-extern int
-scsi_register_acpi_bus_type(struct acpi_bus_type *bus);
-
-extern void
-scsi_unregister_acpi_bus_type(struct acpi_bus_type *bus);
-#endif
 
 /** scsi_status_is_good - check the status return.
  *
@@ -75,6 +48,8 @@ static inline int scsi_status_is_good(int status)
 	 */
 	status &= 0xfe;
 	return ((status == SAM_STAT_GOOD) ||
+		(status == SAM_STAT_CONDITION_MET) ||
+		/* Next two "intermediate" statuses are obsolete in SAM-4 */
 		(status == SAM_STAT_INTERMEDIATE) ||
 		(status == SAM_STAT_INTERMEDIATE_CONDITION_MET) ||
 		/* FIXME: this is obsolete in SAM-3 */
@@ -278,27 +253,6 @@ static inline int scsi_is_wlun(u64 lun)
 #define SCSI_INQ_PQ_CON         0x00
 #define SCSI_INQ_PQ_NOT_CON     0x01
 #define SCSI_INQ_PQ_NOT_CAP     0x03
-
-
-/*
- * Here are some scsi specific ioctl commands which are sometimes useful.
- *
- * Note that include/linux/cdrom.h also defines IOCTL 0x5300 - 0x5395
- */
-
-/* Used to obtain PUN and LUN info.  Conflicts with CDROMAUDIOBUFSIZ */
-#define SCSI_IOCTL_GET_IDLUN		0x5382
-
-/* 0x5383 and 0x5384 were used for SCSI_IOCTL_TAGGED_{ENABLE,DISABLE} */
-
-/* Used to obtain the host number of a device. */
-#define SCSI_IOCTL_PROBE_HOST		0x5385
-
-/* Used to obtain the bus number for a device */
-#define SCSI_IOCTL_GET_BUS_NUMBER	0x5386
-
-/* Used to obtain the PCI location of a device */
-#define SCSI_IOCTL_GET_PCI		0x5387
 
 /* Pull a u32 out of a SCSI message (using BE SCSI conventions) */
 static inline __u32 scsi_to_u32(__u8 *ptr)

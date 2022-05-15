@@ -1,5 +1,8 @@
 /*
  * message.c - synchronous message handling
+ *
+ * Released under the GPLv2 only.
+ * SPDX-License-Identifier: GPL-2.0
  */
 
 #include <linux/pci.h>	/* for scatterlist macros */
@@ -12,6 +15,7 @@
 #include <linux/nls.h>
 #include <linux/device.h>
 #include <linux/scatterlist.h>
+#include <linux/usb/cdc.h>
 #include <linux/usb/quirks.h>
 #include <linux/usb/hcd.h>	/* for usbcore internals */
 #include <asm/byteorder.h>
@@ -122,12 +126,11 @@ static int usb_internal_control_msg(struct usb_device *usb_dev,
  * This function sends a simple control message to a specified endpoint and
  * waits for the message to complete, or timeout.
  *
- * Don't use this function from within an interrupt context, like a bottom half
- * handler.  If you need an asynchronous message, or need to send a message
- * from within interrupt context, use usb_submit_urb().
- * If a thread in your driver uses this call, make sure your disconnect()
- * method can wait for it to complete.  Since you don't have a handle on the
- * URB used, you can't cancel the request.
+ * Don't use this function from within an interrupt context. If you need
+ * an asynchronous message, or need to send a message from within interrupt
+ * context, use usb_submit_urb(). If a thread in your driver uses this call,
+ * make sure your disconnect() method can wait for it to complete. Since you
+ * don't have a handle on the URB used, you can't cancel the request.
  *
  * Return: If successful, the number of bytes transferred. Otherwise, a negative
  * error number.
@@ -177,12 +180,11 @@ EXPORT_SYMBOL_GPL(usb_control_msg);
  * This function sends a simple interrupt message to a specified endpoint and
  * waits for the message to complete, or timeout.
  *
- * Don't use this function from within an interrupt context, like a bottom half
- * handler.  If you need an asynchronous message, or need to send a message
- * from within interrupt context, use usb_submit_urb() If a thread in your
- * driver uses this call, make sure your disconnect() method can wait for it to
- * complete.  Since you don't have a handle on the URB used, you can't cancel
- * the request.
+ * Don't use this function from within an interrupt context. If you need
+ * an asynchronous message, or need to send a message from within interrupt
+ * context, use usb_submit_urb() If a thread in your driver uses this call,
+ * make sure your disconnect() method can wait for it to complete. Since you
+ * don't have a handle on the URB used, you can't cancel the request.
  *
  * Return:
  * If successful, 0. Otherwise a negative error number. The number of actual
@@ -211,12 +213,11 @@ EXPORT_SYMBOL_GPL(usb_interrupt_msg);
  * This function sends a simple bulk message to a specified endpoint
  * and waits for the message to complete, or timeout.
  *
- * Don't use this function from within an interrupt context, like a bottom half
- * handler.  If you need an asynchronous message, or need to send a message
- * from within interrupt context, use usb_submit_urb() If a thread in your
- * driver uses this call, make sure your disconnect() method can wait for it to
- * complete.  Since you don't have a handle on the URB used, you can't cancel
- * the request.
+ * Don't use this function from within an interrupt context. If you need
+ * an asynchronous message, or need to send a message from within interrupt
+ * context, use usb_submit_urb() If a thread in your driver uses this call,
+ * make sure your disconnect() method can wait for it to complete. Since you
+ * don't have a handle on the URB used, you can't cancel the request.
  *
  * Because there is no usb_interrupt_msg() and no USBDEVFS_INTERRUPT ioctl,
  * users are forced to abuse this routine by using it to submit URBs for
@@ -310,9 +311,10 @@ static void sg_complete(struct urb *urb)
 		 */
 		spin_unlock(&io->lock);
 		for (i = 0, found = 0; i < io->entries; i++) {
-			if (!io->urbs[i] || !io->urbs[i]->dev)
+			if (!io->urbs[i])
 				continue;
 			if (found) {
+				usb_block_urb(io->urbs[i]);
 				retval = usb_unlink_urb(io->urbs[i]);
 				if (retval != -EINPROGRESS &&
 				    retval != -ENODEV &&
@@ -480,6 +482,7 @@ EXPORT_SYMBOL_GPL(usb_sg_init);
  * significantly improve USB throughput.
  *
  * There are three kinds of completion for this function.
+ *
  * (1) success, where io->status is zero.  The number of io->bytes
  *     transferred is as requested.
  * (2) error, where io->status is a negative errno value.  The number
@@ -523,12 +526,10 @@ void usb_sg_wait(struct usb_sg_request *io)
 		int retval;
 
 		io->urbs[i]->dev = io->dev;
-		retval = usb_submit_urb(io->urbs[i], GFP_ATOMIC);
-
-		/* after we submit, let completions or cancellations fire;
-		 * we handshake using io->status.
-		 */
 		spin_unlock_irq(&io->lock);
+
+		retval = usb_submit_urb(io->urbs[i], GFP_NOIO);
+
 		switch (retval) {
 			/* maybe we retrying will recover */
 		case -ENXIO:	/* hc didn't queue this one */
@@ -586,30 +587,34 @@ EXPORT_SYMBOL_GPL(usb_sg_wait);
 void usb_sg_cancel(struct usb_sg_request *io)
 {
 	unsigned long flags;
+	int i, retval;
 
 	spin_lock_irqsave(&io->lock, flags);
-
-	/* shut everything down, if it didn't already */
-	if (!io->status) {
-		int i;
-
-		io->status = -ECONNRESET;
-		spin_unlock(&io->lock);
-		for (i = 0; i < io->entries; i++) {
-			int retval;
-
-			if (!io->urbs[i]->dev)
-				continue;
-			retval = usb_unlink_urb(io->urbs[i]);
-			if (retval != -EINPROGRESS
-					&& retval != -ENODEV
-					&& retval != -EBUSY
-					&& retval != -EIDRM)
-				dev_warn(&io->dev->dev, "%s, unlink --> %d\n",
-					__func__, retval);
-		}
-		spin_lock(&io->lock);
+	if (io->status || io->count == 0) {
+		spin_unlock_irqrestore(&io->lock, flags);
+		return;
 	}
+	/* shut everything down */
+	io->status = -ECONNRESET;
+	io->count++;		/* Keep the request alive until we're done */
+	spin_unlock_irqrestore(&io->lock, flags);
+
+	for (i = io->entries - 1; i >= 0; --i) {
+		usb_block_urb(io->urbs[i]);
+
+		retval = usb_unlink_urb(io->urbs[i]);
+		if (retval != -EINPROGRESS
+		    && retval != -ENODEV
+		    && retval != -EBUSY
+		    && retval != -EIDRM)
+			dev_warn(&io->dev->dev, "%s, unlink --> %d\n",
+				 __func__, retval);
+	}
+
+	spin_lock_irqsave(&io->lock, flags);
+	io->count--;
+	if (!io->count)
+		complete(&io->complete);
 	spin_unlock_irqrestore(&io->lock, flags);
 }
 EXPORT_SYMBOL_GPL(usb_sg_cancel);
@@ -826,9 +831,11 @@ int usb_string(struct usb_device *dev, int index, char *buf, size_t size)
 
 	if (dev->state == USB_STATE_SUSPENDED)
 		return -EHOSTUNREACH;
-	if (size <= 0 || !buf || !index)
+	if (size <= 0 || !buf)
 		return -EINVAL;
 	buf[0] = 0;
+	if (index <= 0 || index >= 256)
+		return -EINVAL;
 	tbuf = kmalloc(256, GFP_NOIO);
 	if (!tbuf)
 		return -ENOMEM;
@@ -1081,11 +1088,11 @@ void usb_disable_endpoint(struct usb_device *dev, unsigned int epaddr,
 
 	if (usb_endpoint_out(epaddr)) {
 		ep = dev->ep_out[epnum];
-		if (reset_hardware)
+		if (reset_hardware && epnum != 0)
 			dev->ep_out[epnum] = NULL;
 	} else {
 		ep = dev->ep_in[epnum];
-		if (reset_hardware)
+		if (reset_hardware && epnum != 0)
 			dev->ep_in[epnum] = NULL;
 	}
 	if (ep) {
@@ -1142,6 +1149,34 @@ void usb_disable_interface(struct usb_device *dev, struct usb_interface *intf,
 	}
 }
 
+/*
+ * usb_disable_device_endpoints -- Disable all endpoints for a device
+ * @dev: the device whose endpoints are being disabled
+ * @skip_ep0: 0 to disable endpoint 0, 1 to skip it.
+ */
+static void usb_disable_device_endpoints(struct usb_device *dev, int skip_ep0)
+{
+	struct usb_hcd *hcd = bus_to_hcd(dev->bus);
+	int i;
+
+	if (hcd->driver->check_bandwidth) {
+		/* First pass: Cancel URBs, leave endpoint pointers intact. */
+		for (i = skip_ep0; i < 16; ++i) {
+			usb_disable_endpoint(dev, i, false);
+			usb_disable_endpoint(dev, i + USB_DIR_IN, false);
+		}
+		/* Remove endpoints from the host controller internal state */
+		mutex_lock(hcd->bandwidth_mutex);
+		usb_hcd_alloc_bandwidth(dev, NULL, NULL, NULL);
+		mutex_unlock(hcd->bandwidth_mutex);
+	}
+	/* Second pass: remove endpoint pointers */
+	for (i = skip_ep0; i < 16; ++i) {
+		usb_disable_endpoint(dev, i, true);
+		usb_disable_endpoint(dev, i + USB_DIR_IN, true);
+	}
+}
+
 /**
  * usb_disable_device - Disable all the endpoints for a USB device
  * @dev: the device whose endpoints are being disabled
@@ -1155,7 +1190,6 @@ void usb_disable_interface(struct usb_device *dev, struct usb_interface *intf,
 void usb_disable_device(struct usb_device *dev, int skip_ep0)
 {
 	int i;
-	struct usb_hcd *hcd = bus_to_hcd(dev->bus);
 
 	/* getting rid of interfaces will disconnect
 	 * any drivers bound to them (a key side effect)
@@ -1190,8 +1224,7 @@ void usb_disable_device(struct usb_device *dev, int skip_ep0)
 			dev->actconfig->interface[i] = NULL;
 		}
 
-		if (dev->usb2_hw_lpm_enabled == 1)
-			usb_set_usb2_hardware_lpm(dev, 0);
+		usb_disable_usb2_hardware_lpm(dev);
 		usb_unlocked_disable_lpm(dev);
 		usb_disable_ltm(dev);
 
@@ -1202,22 +1235,8 @@ void usb_disable_device(struct usb_device *dev, int skip_ep0)
 
 	dev_dbg(&dev->dev, "%s nuking %s URBs\n", __func__,
 		skip_ep0 ? "non-ep0" : "all");
-	if (hcd->driver->check_bandwidth) {
-		/* First pass: Cancel URBs, leave endpoint pointers intact. */
-		for (i = skip_ep0; i < 16; ++i) {
-			usb_disable_endpoint(dev, i, false);
-			usb_disable_endpoint(dev, i + USB_DIR_IN, false);
-		}
-		/* Remove endpoints from the host controller internal state */
-		mutex_lock(hcd->bandwidth_mutex);
-		usb_hcd_alloc_bandwidth(dev, NULL, NULL, NULL);
-		mutex_unlock(hcd->bandwidth_mutex);
-		/* Second pass: remove endpoint pointers */
-	}
-	for (i = skip_ep0; i < 16; ++i) {
-		usb_disable_endpoint(dev, i, true);
-		usb_disable_endpoint(dev, i + USB_DIR_IN, true);
-	}
+
+	usb_disable_device_endpoints(dev, skip_ep0);
 }
 
 /**
@@ -1460,6 +1479,9 @@ EXPORT_SYMBOL_GPL(usb_set_interface);
  * The caller must own the device lock.
  *
  * Return: Zero on success, else a negative error code.
+ *
+ * If this routine fails the device will probably be in an unusable state
+ * with endpoints disabled, and interfaces only partially enabled.
  */
 int usb_reset_configuration(struct usb_device *dev)
 {
@@ -1475,10 +1497,7 @@ int usb_reset_configuration(struct usb_device *dev)
 	 * calls during probe() are fine
 	 */
 
-	for (i = 1; i < 16; ++i) {
-		usb_disable_endpoint(dev, i, true);
-		usb_disable_endpoint(dev, i + USB_DIR_IN, true);
-	}
+	usb_disable_device_endpoints(dev, 1); /* skip ep0*/
 
 	config = dev->actconfig;
 	retval = 0;
@@ -1491,34 +1510,10 @@ int usb_reset_configuration(struct usb_device *dev)
 		mutex_unlock(hcd->bandwidth_mutex);
 		return -ENOMEM;
 	}
-	/* Make sure we have enough bandwidth for each alternate setting 0 */
-	for (i = 0; i < config->desc.bNumInterfaces; i++) {
-		struct usb_interface *intf = config->interface[i];
-		struct usb_host_interface *alt;
 
-		alt = usb_altnum_to_altsetting(intf, 0);
-		if (!alt)
-			alt = &intf->altsetting[0];
-		if (alt != intf->cur_altsetting)
-			retval = usb_hcd_alloc_bandwidth(dev, NULL,
-					intf->cur_altsetting, alt);
-		if (retval < 0)
-			break;
-	}
-	/* If not, reinstate the old alternate settings */
+	/* xHCI adds all endpoints in usb_hcd_alloc_bandwidth */
+	retval = usb_hcd_alloc_bandwidth(dev, config, NULL, NULL);
 	if (retval < 0) {
-reset_old_alts:
-		for (i--; i >= 0; i--) {
-			struct usb_interface *intf = config->interface[i];
-			struct usb_host_interface *alt;
-
-			alt = usb_altnum_to_altsetting(intf, 0);
-			if (!alt)
-				alt = &intf->altsetting[0];
-			if (alt != intf->cur_altsetting)
-				usb_hcd_alloc_bandwidth(dev, NULL,
-						alt, intf->cur_altsetting);
-		}
 		usb_enable_lpm(dev);
 		mutex_unlock(hcd->bandwidth_mutex);
 		return retval;
@@ -1527,8 +1522,12 @@ reset_old_alts:
 			USB_REQ_SET_CONFIGURATION, 0,
 			config->desc.bConfigurationValue, 0,
 			NULL, 0, USB_CTRL_SET_TIMEOUT);
-	if (retval < 0)
-		goto reset_old_alts;
+	if (retval < 0) {
+		usb_hcd_alloc_bandwidth(dev, NULL, NULL, NULL);
+		usb_enable_lpm(dev);
+		mutex_unlock(hcd->bandwidth_mutex);
+		return retval;
+	}
 	mutex_unlock(hcd->bandwidth_mutex);
 
 	/* re-init hc/hcd interface/endpoint state */
@@ -1784,17 +1783,14 @@ int usb_set_configuration(struct usb_device *dev, int configuration)
 		nintf = cp->desc.bNumInterfaces;
 		new_interfaces = kmalloc(nintf * sizeof(*new_interfaces),
 				GFP_NOIO);
-		if (!new_interfaces) {
-			dev_err(&dev->dev, "Out of memory\n");
+		if (!new_interfaces)
 			return -ENOMEM;
-		}
 
 		for (; n < nintf; ++n) {
 			new_interfaces[n] = kzalloc(
 					sizeof(struct usb_interface),
 					GFP_NOIO);
 			if (!new_interfaces[n]) {
-				dev_err(&dev->dev, "Out of memory\n");
 				ret = -ENOMEM;
 free_interfaces:
 				while (--n >= 0)
@@ -1886,7 +1882,12 @@ free_interfaces:
 		intf->dev.bus = &usb_bus_type;
 		intf->dev.type = &usb_if_device_type;
 		intf->dev.groups = usb_interface_groups;
+		/*
+		 * Please refer to usb_alloc_dev() to see why we set
+		 * dma_mask and dma_pfn_offset.
+		 */
 		intf->dev.dma_mask = dev->dev.dma_mask;
+		intf->dev.dma_pfn_offset = dev->dev.dma_pfn_offset;
 		INIT_WORK(&intf->reset_ws, __usb_queue_reset_device);
 		intf->minor = -1;
 		device_initialize(&intf->dev);
@@ -2048,3 +2049,159 @@ int usb_driver_set_configuration(struct usb_device *udev, int config)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(usb_driver_set_configuration);
+
+/**
+ * cdc_parse_cdc_header - parse the extra headers present in CDC devices
+ * @hdr: the place to put the results of the parsing
+ * @intf: the interface for which parsing is requested
+ * @buffer: pointer to the extra headers to be parsed
+ * @buflen: length of the extra headers
+ *
+ * This evaluates the extra headers present in CDC devices which
+ * bind the interfaces for data and control and provide details
+ * about the capabilities of the device.
+ *
+ * Return: number of descriptors parsed or -EINVAL
+ * if the header is contradictory beyond salvage
+ */
+
+int cdc_parse_cdc_header(struct usb_cdc_parsed_header *hdr,
+				struct usb_interface *intf,
+				u8 *buffer,
+				int buflen)
+{
+	/* duplicates are ignored */
+	struct usb_cdc_union_desc *union_header = NULL;
+
+	/* duplicates are not tolerated */
+	struct usb_cdc_header_desc *header = NULL;
+	struct usb_cdc_ether_desc *ether = NULL;
+	struct usb_cdc_mdlm_detail_desc *detail = NULL;
+	struct usb_cdc_mdlm_desc *desc = NULL;
+
+	unsigned int elength;
+	int cnt = 0;
+
+	memset(hdr, 0x00, sizeof(struct usb_cdc_parsed_header));
+	hdr->phonet_magic_present = false;
+	while (buflen > 0) {
+		elength = buffer[0];
+		if (!elength) {
+			dev_err(&intf->dev, "skipping garbage byte\n");
+			elength = 1;
+			goto next_desc;
+		}
+		if ((buflen < elength) || (elength < 3)) {
+			dev_err(&intf->dev, "invalid descriptor buffer length\n");
+			break;
+		}
+		if (buffer[1] != USB_DT_CS_INTERFACE) {
+			dev_err(&intf->dev, "skipping garbage\n");
+			goto next_desc;
+		}
+
+		switch (buffer[2]) {
+		case USB_CDC_UNION_TYPE: /* we've found it */
+			if (elength < sizeof(struct usb_cdc_union_desc))
+				goto next_desc;
+			if (union_header) {
+				dev_err(&intf->dev, "More than one union descriptor, skipping ...\n");
+				goto next_desc;
+			}
+			union_header = (struct usb_cdc_union_desc *)buffer;
+			break;
+		case USB_CDC_COUNTRY_TYPE:
+			if (elength < sizeof(struct usb_cdc_country_functional_desc))
+				goto next_desc;
+			hdr->usb_cdc_country_functional_desc =
+				(struct usb_cdc_country_functional_desc *)buffer;
+			break;
+		case USB_CDC_HEADER_TYPE:
+			if (elength != sizeof(struct usb_cdc_header_desc))
+				goto next_desc;
+			if (header)
+				return -EINVAL;
+			header = (struct usb_cdc_header_desc *)buffer;
+			break;
+		case USB_CDC_ACM_TYPE:
+			if (elength < sizeof(struct usb_cdc_acm_descriptor))
+				goto next_desc;
+			hdr->usb_cdc_acm_descriptor =
+				(struct usb_cdc_acm_descriptor *)buffer;
+			break;
+		case USB_CDC_ETHERNET_TYPE:
+			if (elength != sizeof(struct usb_cdc_ether_desc))
+				goto next_desc;
+			if (ether)
+				return -EINVAL;
+			ether = (struct usb_cdc_ether_desc *)buffer;
+			break;
+		case USB_CDC_CALL_MANAGEMENT_TYPE:
+			if (elength < sizeof(struct usb_cdc_call_mgmt_descriptor))
+				goto next_desc;
+			hdr->usb_cdc_call_mgmt_descriptor =
+				(struct usb_cdc_call_mgmt_descriptor *)buffer;
+			break;
+		case USB_CDC_DMM_TYPE:
+			if (elength < sizeof(struct usb_cdc_dmm_desc))
+				goto next_desc;
+			hdr->usb_cdc_dmm_desc =
+				(struct usb_cdc_dmm_desc *)buffer;
+			break;
+		case USB_CDC_MDLM_TYPE:
+			if (elength < sizeof(struct usb_cdc_mdlm_desc))
+				goto next_desc;
+			if (desc)
+				return -EINVAL;
+			desc = (struct usb_cdc_mdlm_desc *)buffer;
+			break;
+		case USB_CDC_MDLM_DETAIL_TYPE:
+			if (elength < sizeof(struct usb_cdc_mdlm_detail_desc))
+				goto next_desc;
+			if (detail)
+				return -EINVAL;
+			detail = (struct usb_cdc_mdlm_detail_desc *)buffer;
+			break;
+		case USB_CDC_NCM_TYPE:
+			if (elength < sizeof(struct usb_cdc_ncm_desc))
+				goto next_desc;
+			hdr->usb_cdc_ncm_desc = (struct usb_cdc_ncm_desc *)buffer;
+			break;
+		case USB_CDC_MBIM_TYPE:
+			if (elength < sizeof(struct usb_cdc_mbim_desc))
+				goto next_desc;
+
+			hdr->usb_cdc_mbim_desc = (struct usb_cdc_mbim_desc *)buffer;
+			break;
+		case USB_CDC_MBIM_EXTENDED_TYPE:
+			if (elength < sizeof(struct usb_cdc_mbim_extended_desc))
+				break;
+			hdr->usb_cdc_mbim_extended_desc =
+				(struct usb_cdc_mbim_extended_desc *)buffer;
+			break;
+		case CDC_PHONET_MAGIC_NUMBER:
+			hdr->phonet_magic_present = true;
+			break;
+		default:
+			/*
+			 * there are LOTS more CDC descriptors that
+			 * could legitimately be found here.
+			 */
+			dev_dbg(&intf->dev, "Ignoring descriptor: type %02x, length %ud\n",
+					buffer[2], elength);
+			goto next_desc;
+		}
+		cnt++;
+next_desc:
+		buflen -= elength;
+		buffer += elength;
+	}
+	hdr->usb_cdc_union_desc = union_header;
+	hdr->usb_cdc_header_desc = header;
+	hdr->usb_cdc_mdlm_detail_desc = detail;
+	hdr->usb_cdc_mdlm_desc = desc;
+	hdr->usb_cdc_ether_desc = ether;
+	return cnt;
+}
+
+EXPORT_SYMBOL(cdc_parse_cdc_header);

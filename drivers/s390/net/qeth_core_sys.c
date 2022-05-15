@@ -78,7 +78,7 @@ static ssize_t qeth_dev_card_type_show(struct device *dev,
 
 static DEVICE_ATTR(card_type, 0444, qeth_dev_card_type_show, NULL);
 
-static inline const char *qeth_get_bufsize_str(struct qeth_card *card)
+static const char *qeth_get_bufsize_str(struct qeth_card *card)
 {
 	if (card->qdio.in_buf_size == 16384)
 		return "16k";
@@ -243,6 +243,10 @@ static ssize_t qeth_dev_prioqing_store(struct device *dev,
 		card->qdio.do_prio_queueing = QETH_NO_PRIO_QUEUEING;
 		card->qdio.default_out_queue = 2;
 	} else if (sysfs_streq(buf, "no_prio_queueing:3")) {
+		if (card->info.type == QETH_CARD_TYPE_IQD) {
+			rc = -EPERM;
+			goto out;
+		}
 		card->qdio.do_prio_queueing = QETH_NO_PRIO_QUEUEING;
 		card->qdio.default_out_queue = 3;
 	} else if (sysfs_streq(buf, "no_prio_queueing")) {
@@ -409,7 +413,7 @@ static ssize_t qeth_dev_layer2_store(struct device *dev,
 
 	if (card->options.layer2 == newdis)
 		goto out;
-	if (card->info.type == QETH_CARD_TYPE_OSM) {
+	if (card->info.layer_enforced) {
 		/* fixed layer, can't switch */
 		rc = -EOPNOTSUPP;
 		goto out;

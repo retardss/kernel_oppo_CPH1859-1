@@ -7,12 +7,24 @@ config ARM_GIC
 	select IRQ_DOMAIN
 	select IRQ_DOMAIN_HIERARCHY
 	select MULTI_IRQ_HANDLER
+	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
+
+config ARM_GIC_PM
+	bool
+	depends on PM
+	select ARM_GIC
+	select PM_CLK
+
+config ARM_GIC_MAX_NR
+	int
+	default 2 if ARCH_REALVIEW
+	default 1
 
 config ARM_GIC_V2M
 	bool
-	depends on ARM_GIC
-	depends on PCI && PCI_MSI
-	select PCI_MSI_IRQ_DOMAIN
+	depends on PCI
+	select ARM_GIC
+	select PCI_MSI
 
 config GIC_NON_BANKED
 	bool
@@ -22,10 +34,23 @@ config ARM_GIC_V3
 	select IRQ_DOMAIN
 	select MULTI_IRQ_HANDLER
 	select IRQ_DOMAIN_HIERARCHY
+	select PARTITION_PERCPU
+	select QCOM_SHOW_RESUME_IRQ
+	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
 
 config ARM_GIC_V3_ITS
 	bool
-	select PCI_MSI_IRQ_DOMAIN
+	depends on PCI
+	depends on PCI_MSI
+
+config ARM_GIC_V3_ACL
+	bool "GICv3 Access control"
+	depends on ARM_GIC_V3
+	help
+	  Access to GIC ITS address space is controlled by EL2.
+	  Kernel has no permission to access GIC ITS address space.
+	  If you wish to enforce the Acces control then set this
+	  option to Y, if you are unsure please say N.
 
 config ARM_NVIC
 	bool
@@ -47,6 +72,18 @@ config ARM_VIC_NR
 	  The maximum number of VICs available in the system, for
 	  power management.
 
+config ARMADA_370_XP_IRQ
+	bool
+	select GENERIC_IRQ_CHIP
+	select PCI_MSI if PCI
+	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
+
+config ALPINE_MSI
+	bool
+	depends on PCI
+	select PCI_MSI
+	select GENERIC_IRQ_CHIP
+
 config ATMEL_AIC_IRQ
 	bool
 	select GENERIC_IRQ_CHIP
@@ -65,10 +102,17 @@ config I8259
 	bool
 	select IRQ_DOMAIN
 
+config BCM6345_L1_IRQ
+	bool
+	select GENERIC_IRQ_CHIP
+	select IRQ_DOMAIN
+	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
+
 config BCM7038_L1_IRQ
 	bool
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
+	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
 
 config BCM7120_L2_IRQ
 	bool
@@ -80,10 +124,31 @@ config BRCMSTB_L2_IRQ
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
 
+config QCOM_SHOW_RESUME_IRQ
+	bool "Enable logging of interrupts that could have caused resume"
+	depends on ARM_GIC
+	default n
+	help
+	  This option logs wake up interrupts that have triggered just before
+	  the resume loop unrolls. It helps to debug to know any unnecessary
+	  wake up interrupts that causes system to come out of low power modes.
+	  Say Y if you want to debug why the system resumed.
+
 config DW_APB_ICTL
 	bool
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
+
+config FARADAY_FTINTC010
+	bool
+	select IRQ_DOMAIN
+	select MULTI_IRQ_HANDLER
+	select SPARSE_IRQ
+
+config HISILICON_IRQ_MBIGEN
+	bool
+	select ARM_GIC_V3
+	select ARM_GIC_V3_ITS
 
 config IMGPDC_IRQ
 	bool
@@ -93,7 +158,10 @@ config IMGPDC_IRQ
 config IRQ_MIPS_CPU
 	bool
 	select GENERIC_IRQ_CHIP
+	select GENERIC_IRQ_IPI if SYS_SUPPORTS_MULTITHREADING
 	select IRQ_DOMAIN
+	select IRQ_DOMAIN_HIERARCHY if GENERIC_IRQ_IPI
+	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
 
 config CLPS711X_IRQCHIP
 	bool
@@ -117,6 +185,18 @@ config ORION_IRQCHIP
 	select IRQ_DOMAIN
 	select MULTI_IRQ_HANDLER
 
+config PIC32_EVIC
+	bool
+	select GENERIC_IRQ_CHIP
+	select IRQ_DOMAIN
+
+config JCORE_AIC
+	bool "J-Core integrated AIC" if COMPILE_TEST
+	depends on OF
+	select IRQ_DOMAIN
+	help
+	  Support for the J-Core integrated AIC.
+
 config RENESAS_INTC_IRQPIN
 	bool
 	select IRQ_DOMAIN
@@ -133,10 +213,23 @@ config ST_IRQCHIP
 	help
 	  Enables SysCfg Controlled IRQs on STi based platforms.
 
+config TANGO_IRQ
+	bool
+	select IRQ_DOMAIN
+	select GENERIC_IRQ_CHIP
+
 config TB10X_IRQC
 	bool
 	select IRQ_DOMAIN
 	select GENERIC_IRQ_CHIP
+
+config TS4800_IRQ
+	tristate "TS-4800 IRQ controller"
+	select IRQ_DOMAIN
+	depends on HAS_IOMEM
+	depends on SOC_IMX51 || COMPILE_TEST
+	help
+	  Support for the TS-4800 FPGA IRQ controller
 
 config VERSATILE_FPGA_IRQ
 	bool
@@ -148,6 +241,11 @@ config VERSATILE_FPGA_IRQ_NR
        depends on VERSATILE_FPGA_IRQ
 
 config XTENSA_MX
+	bool
+	select IRQ_DOMAIN
+	select GENERIC_IRQ_EFFECTIVE_AFF_MASK
+
+config XILINX_INTC
 	bool
 	select IRQ_DOMAIN
 
@@ -168,6 +266,8 @@ config KEYSTONE_IRQ
 
 config MIPS_GIC
 	bool
+	select GENERIC_IRQ_IPI
+	select IRQ_DOMAIN_HIERARCHY
 	select MIPS_CM
 
 config INGENIC_IRQ
@@ -194,70 +294,52 @@ config IRQ_MXS
 	select IRQ_DOMAIN
 	select STMP_DEVICE
 
-config MTK_EIC
+config MVEBU_GICP
 	bool
+
+config MVEBU_ICU
+	bool
+
+config MVEBU_ODMI
+	bool
+	select GENERIC_MSI_IRQ_DOMAIN
+
+config MVEBU_PIC
+	bool
+
+config LS_SCFG_MSI
+	def_bool y if SOC_LS1021A || ARCH_LAYERSCAPE
+	depends on PCI && PCI_MSI
+
+config PARTITION_PERCPU
+	bool
+
+config EZNPS_GIC
+	bool "NPS400 Global Interrupt Manager (GIM)"
+	depends on ARC || (COMPILE_TEST && !64BIT)
 	select IRQ_DOMAIN
 	help
-	  This option is used to enable external interrupt controller for
-	  MediaTek solutions.
+	  Support the EZchip NPS400 global interrupt controller
 
-config MTK_SEC_DEINT_SUPPORT
+config STM32_EXTI
 	bool
-	def_bool n
-	depends on MTK_EIC
+	select IRQ_DOMAIN
+
+config QCOM_IRQ_COMBINER
+	bool "QCOM IRQ combiner support"
+	depends on ARCH_QCOM && ACPI
+	select IRQ_DOMAIN
+	select IRQ_DOMAIN_HIERARCHY
 	help
-	  This option is used to enable a feature called secure direct eint support.
-	  This feature have to be enabled with MTK_SEC_DEIC_SUPPORT in ATF. ATF direct
-	  secure EINT driver have provide secure DEINT Configuration and Release command
-	  for SMC call originated from TEE and filter the SMC call from kernel. The change for
-	  kernel EINT driver is that mt_eint_set_deint() will check the wanted deint is secure
-	  direct eint, if yes, skip the configuration. if not, kernel can configure this deint.
-	  Since not every platform support secure direct eint, you must enable this config carefully.
+	  Say yes here to add support for the IRQ combiner devices embedded
+	  in Qualcomm Technologies chips.
 
-config MTK_INTPOL
-	bool
+config IRQ_UNIPHIER_AIDET
+	bool "UniPhier AIDET support" if COMPILE_TEST
+	depends on ARCH_UNIPHIER || COMPILE_TEST
+	default ARCH_UNIPHIER
+	select IRQ_DOMAIN_HIERARCHY
 	help
-	  Support for MediaTek intpol used on mt65xx/mt81xx.
+	  Support for the UniPhier AIDET (ARM Interrupt Detector).
 
-
-config MTK_EIC_HISTORY_DUMP
-	bool "Enable MTK EIC HISTORY Debugger"
-	def_bool n
-	depends on MTK_EIC
-	help
-	  This option is a debugging feature used to collect last eint interupts
-	  and its property before WDT TIMEOUT.
-	  With thie option, we could know which eint interrupt is triggered
-	  too often to cause system watchdog timeout.
-
-config MTK_IRQ_NEW_DESIGN
-	bool
-	help
-	  Support for new interrupt distribution design for MediaTek solutions.
-	  With this feature enabled, the SPI interrupts would be routed to all the
-	  cores rather than cpu0 to achieve better load balance of interrupt handling.
-
-config MTK_IRQ_NEW_DESIGN_DEBUG
-	bool
-	select MTK_IRQ_NEW_DESIGN
-	help
-	  Support for debugging feature for MediaTek new interrupt design.
-	  With this feature enabled, system would assert when an error occurs rather than
-	  output warning messages.
-
-config MTK_SYSIRQ
-	bool
-	default y if ARCH_MEDIATEK
-	help
-	  GIC only support IRQ_TYPE_LEVEL_HIGH and IRQ_TYPE_EDGE_RISING,
-	  so this driver is designed for polarity configuration
-	  in order to make GIC driver support various trigger type
-	  including IRQ_TYPE_LEVEL_LOW and IRQ_TYPE_EDGE_FALLING.
-
-config GOLDFISH_PIC
-       bool "Goldfish programmable interrupt controller"
-       depends on MIPS && (GOLDFISH || COMPILE_TEST)
-       select IRQ_DOMAIN
-       help
-         Say yes here to enable Goldfish interrupt controller driver used
-         for Goldfish based virtual platforms.
+source "drivers/irqchip/qcom/Kconfig"

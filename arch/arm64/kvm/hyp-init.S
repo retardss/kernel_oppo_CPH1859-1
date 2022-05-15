@@ -21,6 +21,8 @@
 #include <asm/kvm_arm.h>
 #include <asm/kvm_mmu.h>
 #include <asm/pgtable-hwdef.h>
+#include <asm/sysreg.h>
+#include <asm/virt.h>
 
 	.text
 	.pushsection	.hyp.idmap.text, "ax"
@@ -52,12 +54,14 @@ __invalid:
 	b	.
 
 	/*
-	 * x0: HYP boot pgd
-	 * x1: HYP pgd
-	 * x2: HYP stack
-	 * x3: HYP vectors
+	 * x0: HYP pgd
+	 * x1: HYP stack
+	 * x2: HYP vectors
 	 */
 __do_hyp_init:
+	/* Check for a stub HVC call */
+	cmp	x0, #HVC_STUB_HCALL_NR
+	b.lo	__kvm_handle_stub_hvc
 
 	msr	ttbr0_el2, x0
 
@@ -87,17 +91,12 @@ __do_hyp_init:
 #endif
 	/*
 	 * Read the PARange bits from ID_AA64MMFR0_EL1 and set the PS bits in
-	 * TCR_EL2 and VTCR_EL2.
+	 * TCR_EL2.
 	 */
 	mrs	x5, ID_AA64MMFR0_EL1
 	bfi	x4, x5, #16, #3
 
 	msr	tcr_el2, x4
-
-	ldr	x4, =VTCR_EL2_FLAGS
-	bfi	x4, x5, #16, #3
-
-	msr	vtcr_el2, x4
 
 	mrs	x4, mair_el1
 	msr	mair_el2, x4
@@ -107,41 +106,73 @@ __do_hyp_init:
 	tlbi	alle2
 	dsb	sy
 
-	mrs	x4, sctlr_el2
-	and	x4, x4, #SCTLR_EL2_EE	// preserve endianness of EL2
-	ldr	x5, =SCTLR_EL2_FLAGS
-	orr	x4, x4, x5
+	/*
+	 * Preserve all the RES1 bits while setting the default flags,
+	 * as well as the EE bit on BE. Drop the A flag since the compiler
+	 * is allowed to generate unaligned accesses.
+	 */
+	ldr	x4, =(SCTLR_EL2_RES1 | (SCTLR_ELx_FLAGS & ~SCTLR_ELx_A))
+CPU_BE(	orr	x4, x4, #SCTLR_ELx_EE)
 	msr	sctlr_el2, x4
 	isb
 
-	/* Skip the trampoline dance if we merged the boot and runtime PGDs */
-	cmp	x0, x1
-	b.eq	merged
-
-	/* MMU is now enabled. Get ready for the trampoline dance */
-	ldr	x4, =TRAMPOLINE_VA
-	adr	x5, target
-	bfi	x4, x5, #0, #PAGE_SHIFT
-	br	x4
-
-target: /* We're now in the trampoline code, switch page tables */
-	msr	ttbr0_el2, x1
-	isb
-
-	/* Invalidate the old TLBs */
-	tlbi	alle2
-	dsb	sy
-
-merged:
 	/* Set the stack and new vectors */
+	kern_hyp_va	x1
+	mov	sp, x1
 	kern_hyp_va	x2
-	mov	sp, x2
-	kern_hyp_va	x3
-	msr	vbar_el2, x3
+	msr	vbar_el2, x2
+
+	/* copy tpidr_el1 into tpidr_el2 for use by HYP */
+	mrs	x1, tpidr_el1
+	msr	tpidr_el2, x1
 
 	/* Hello, World! */
 	eret
 ENDPROC(__kvm_hyp_init)
+
+ENTRY(__kvm_handle_stub_hvc)
+	cmp	x0, #HVC_SOFT_RESTART
+	b.ne	1f
+
+	/* This is where we're about to jump, staying at EL2 */
+	msr	elr_el2, x1
+	mov	x0, #(PSR_F_BIT | PSR_I_BIT | PSR_A_BIT | PSR_D_BIT | PSR_MODE_EL2h)
+	msr	spsr_el2, x0
+
+	/* Shuffle the arguments, and don't come back */
+	mov	x0, x2
+	mov	x1, x3
+	mov	x2, x4
+	b	reset
+
+1:	cmp	x0, #HVC_RESET_VECTORS
+	b.ne	1f
+
+	/*
+	 * Set the HVC_RESET_VECTORS return code before entering the common
+	 * path so that we do not clobber x0-x2 in case we are coming via
+	 * HVC_SOFT_RESTART.
+	 */
+	mov	x0, xzr
+reset:
+	/* Reset kvm back to the hyp stub. */
+	mrs	x5, sctlr_el2
+	ldr	x6, =SCTLR_ELx_FLAGS
+	bic	x5, x5, x6		// Clear SCTL_M and etc
+	pre_disable_mmu_workaround
+	msr	sctlr_el2, x5
+	isb
+
+	/* Install stub vectors */
+	adr_l	x5, __hyp_stub_vectors
+	msr	vbar_el2, x5
+	eret
+
+1:	/* Bad stub call */
+	ldr	x0, =HVC_STUB_ERR
+	eret
+
+ENDPROC(__kvm_handle_stub_hvc)
 
 	.ltorg
 

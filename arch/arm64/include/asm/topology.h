@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_TOPOLOGY_H
 #define __ASM_TOPOLOGY_H
 
@@ -29,28 +30,29 @@ void init_cpu_topology(void);
 void store_cpu_topology(unsigned int cpuid);
 const struct cpumask *cpu_coregroup_mask(int cpu);
 
-/* Extras of CPU & Cluster functions */
-extern int arch_cpu_is_big(unsigned int cpu);
-extern int arch_cpu_is_little(unsigned int cpu);
-extern int arch_is_multi_cluster(void);
-extern int arch_is_smp(void);
-extern int arch_get_nr_clusters(void);
-extern int arch_get_cluster_id(unsigned int cpu);
-extern void arch_get_cluster_cpus(struct cpumask *cpus, int cluster_id);
-extern int arch_better_capacity(unsigned int cpu);
+#ifdef CONFIG_NUMA
 
-#ifdef CONFIG_MTK_CPU_TOPOLOGY
-void arch_build_cpu_topology_domain(void);
-#endif
+struct pci_bus;
+int pcibus_to_node(struct pci_bus *bus);
+#define cpumask_of_pcibus(bus)	(pcibus_to_node(bus) == -1 ?		\
+				 cpu_all_mask :				\
+				 cpumask_of_node(pcibus_to_node(bus)))
 
-#ifdef CONFIG_MTK_SCHED_EAS_POWER_SUPPORT
-extern inline
-int mtk_idle_power(int idle_state, int cid, void *argu, int);
+#endif /* CONFIG_NUMA */
 
-extern inline
-int mtk_busy_power(int cpu, void *argu, int);
-#endif
+#include <linux/arch_topology.h>
 
+/* Replace task scheduler's default frequency-invariant accounting */
+#define arch_scale_freq_capacity topology_get_freq_scale
+
+/* Replace task scheduler's default max-frequency-invariant accounting */
+#define arch_scale_max_freq_capacity topology_get_max_freq_scale
+
+/* Replace task scheduler's default cpu-invariant accounting */
+#define arch_scale_cpu_capacity topology_get_cpu_scale
+
+/* Enable topology flag updates */
+#define arch_update_cpu_topology topology_update_cpu_topology
 
 #include <asm-generic/topology.h>
 

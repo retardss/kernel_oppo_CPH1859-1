@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015-2016 MediaTek Inc.
+ * Author: Honghui Zhang <honghui.zhang@mediatek.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -14,7 +15,13 @@
 #ifndef _MTK_IOMMU_H_
 #define _MTK_IOMMU_H_
 
+#include <linux/clk.h>
+#include <linux/component.h>
+#include <linux/device.h>
+#include <linux/io.h>
 #include <linux/iommu.h>
+#include <linux/list.h>
+#include <linux/spinlock.h>
 #include <soc/mediatek/smi.h>
 
 #include "io-pgtable.h"
@@ -25,22 +32,16 @@ struct mtk_iommu_suspend_reg {
 	u32				ctrl_reg;
 	u32				int_control0;
 	u32				int_main_control;
+	u32				ivrp_paddr;
 };
 
-struct mtk_iommu_client_priv {
-	struct list_head		client;
-	unsigned int			mtk_m4u_id;
-	struct device			*m4udev;
+enum mtk_iommu_plat {
+	M4U_MT2701,
+	M4U_MT2712,
+	M4U_MT8173,
 };
 
-struct mtk_iommu_domain {
-	spinlock_t			pgtlock; /* lock for page table */
-
-	struct io_pgtable_cfg		cfg;
-	struct io_pgtable_ops		*iop;
-
-	struct iommu_domain		domain;
-};
+struct mtk_iommu_domain;
 
 struct mtk_iommu_data {
 	void __iomem			*base;
@@ -53,34 +54,36 @@ struct mtk_iommu_data {
 	struct iommu_group		*m4u_group;
 	struct mtk_smi_iommu		smi_imu;      /* SMI larb iommu info */
 	bool                            enable_4GB;
+	bool				tlb_flush_active;
+
+	struct iommu_device		iommu;
+	enum mtk_iommu_plat		m4u_plat;
+
+	struct list_head		list;
 };
 
-#ifdef CONFIG_MTK_IOMMU
-unsigned long mtk_get_pgt_base(void);
-extern phys_addr_t mtkfb_get_fb_base(void);
-#ifndef CONFIG_MTK_SMI_EXT
-size_t mtkfb_get_fb_size(void);
-#endif
-int smi_reg_backup_sec(void);
-int smi_reg_restore_sec(void);
-
-typedef enum mtk_iommu_callback_ret {
-	MTK_IOMMU_CALLBACK_HANDLED,
-	MTK_IOMMU_CALLBACK_NOT_HANDLED,
-} mtk_iommu_callback_ret_t;
-
-typedef mtk_iommu_callback_ret_t (mtk_iommu_fault_callback_t)(int port, unsigned int mva, void *cb_data);
-int mtk_iommu_register_fault_callback(int port, mtk_iommu_fault_callback_t *fn, void *cb_data);
-int mtk_iommu_unregister_fault_callback(int port);
-int mtk_iommu_enable_tf(int port, bool fgenable);
-void *mtk_iommu_iova_to_va(struct device *dev, dma_addr_t iova, size_t size);
-
-#else
-static unsigned long mtk_get_pgt_base(void)
+static inline int compare_of(struct device *dev, void *data)
 {
-	return 0;
+	return dev->of_node == data;
 }
 
-#endif
+static inline void release_of(struct device *dev, void *data)
+{
+	of_node_put(data);
+}
+
+static inline int mtk_iommu_bind(struct device *dev)
+{
+	struct mtk_iommu_data *data = dev_get_drvdata(dev);
+
+	return component_bind_all(dev, &data->smi_imu);
+}
+
+static inline void mtk_iommu_unbind(struct device *dev)
+{
+	struct mtk_iommu_data *data = dev_get_drvdata(dev);
+
+	component_unbind_all(dev, &data->smi_imu);
+}
 
 #endif

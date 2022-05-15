@@ -178,7 +178,7 @@ static void rfcomm_reparent_device(struct rfcomm_dev *dev)
 	struct hci_dev *hdev;
 	struct hci_conn *conn;
 
-	hdev = hci_get_route(&dev->dst, &dev->src);
+	hdev = hci_get_route(&dev->dst, &dev->src, BDADDR_BREDR);
 	if (!hdev)
 		return;
 
@@ -413,10 +413,8 @@ static int __rfcomm_create_dev(struct sock *sk, void __user *arg)
 		dlc = rfcomm_dlc_exists(&req.src, &req.dst, req.channel);
 		if (IS_ERR(dlc))
 			return PTR_ERR(dlc);
-		else if (dlc) {
-			rfcomm_dlc_put(dlc);
+		if (dlc)
 			return -EBUSY;
-		}
 		dlc = rfcomm_dlc_alloc(GFP_KERNEL);
 		if (!dlc)
 			return -ENOMEM;
@@ -798,7 +796,7 @@ static int rfcomm_tty_write(struct tty_struct *tty, const unsigned char *buf, in
 
 		skb_reserve(skb, RFCOMM_SKB_HEAD_RESERVE);
 
-		memcpy(skb_put(skb, size), buf + sent, size);
+		skb_put_data(skb, buf + sent, size);
 
 		rfcomm_dlc_send_noerror(dlc, skb);
 

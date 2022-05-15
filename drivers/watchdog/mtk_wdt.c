@@ -33,8 +33,6 @@
 #include <linux/platform_device.h>
 #include <linux/types.h>
 #include <linux/watchdog.h>
-#include <linux/notifier.h>
-#include <linux/reboot.h>
 #include <linux/delay.h>
 #include <linux/reset-controller.h>
 #include <linux/reset.h>
@@ -97,97 +95,15 @@ struct toprgu_reset {
 struct mtk_wdt_dev {
 	struct watchdog_device wdt_dev;
 	void __iomem *wdt_base;
-	int wdt_irq_id;
-	struct notifier_block restart_handler;
-	struct toprgu_reset reset_controller;
 };
 
-static void __iomem *toprgu_base;
-static struct watchdog_device *wdt_dev;
-
-static int toprgu_reset_assert(struct reset_controller_dev *rcdev,
-			      unsigned long id)
+static int mtk_wdt_restart(struct watchdog_device *wdt_dev,
+			   unsigned long action, void *data)
 {
-	unsigned int tmp;
-	unsigned long flags;
-	struct toprgu_reset *data = container_of(rcdev, struct toprgu_reset, rcdev);
-
-	spin_lock_irqsave(&data->lock, flags);
-
-	tmp = __raw_readl(data->toprgu_swrst_base + data->regofs);
-	tmp |= BIT(id);
-	tmp |= WDT_SWSYSRST_KEY;
-	writel(tmp, data->toprgu_swrst_base + data->regofs);
-
-	spin_unlock_irqrestore(&data->lock, flags);
-
-	return 0;
-}
-
-static int toprgu_reset_deassert(struct reset_controller_dev *rcdev,
-				unsigned long id)
-{
-	unsigned int tmp;
-	unsigned long flags;
-	struct toprgu_reset *data = container_of(rcdev, struct toprgu_reset, rcdev);
-
-	spin_lock_irqsave(&data->lock, flags);
-
-	tmp = __raw_readl(data->toprgu_swrst_base + data->regofs);
-	tmp &= ~BIT(id);
-	tmp |= WDT_SWSYSRST_KEY;
-	writel(tmp, data->toprgu_swrst_base + data->regofs);
-
-	spin_unlock_irqrestore(&data->lock, flags);
-
-	return 0;
-}
-
-static int toprgu_reset(struct reset_controller_dev *rcdev,
-			      unsigned long id)
-{
-	int ret;
-
-	ret = toprgu_reset_assert(rcdev, id);
-	if (ret)
-		return ret;
-
-	return toprgu_reset_deassert(rcdev, id);
-}
-
-static struct reset_control_ops toprgu_reset_ops = {
-	.assert = toprgu_reset_assert,
-	.deassert = toprgu_reset_deassert,
-	.reset = toprgu_reset,
-};
-
-static void toprgu_register_reset_controller(struct platform_device *pdev, int regofs)
-{
-	int ret;
-	struct mtk_wdt_dev *mtk_wdt = platform_get_drvdata(pdev);
-
-	spin_lock_init(&mtk_wdt->reset_controller.lock);
-
-	mtk_wdt->reset_controller.toprgu_swrst_base = mtk_wdt->wdt_base;
-	mtk_wdt->reset_controller.regofs = regofs;
-	mtk_wdt->reset_controller.rcdev.owner = THIS_MODULE;
-	mtk_wdt->reset_controller.rcdev.nr_resets = 15;
-	mtk_wdt->reset_controller.rcdev.ops = &toprgu_reset_ops;
-	mtk_wdt->reset_controller.rcdev.of_node = pdev->dev.of_node;
-
-	ret = reset_controller_register(&mtk_wdt->reset_controller.rcdev);
-	if (ret)
-		pr_err("could not register toprgu reset controller: %d\n", ret);
-}
-
-static int mtk_reset_handler(struct notifier_block *this, unsigned long mode,
-				void *cmd)
-{
-	struct mtk_wdt_dev *mtk_wdt;
+	struct mtk_wdt_dev *mtk_wdt = watchdog_get_drvdata(wdt_dev);
 	void __iomem *wdt_base;
 	u32 reg;
 
-	mtk_wdt = container_of(this, struct mtk_wdt_dev, restart_handler);
 	wdt_base = mtk_wdt->wdt_base;
 
 	/* WDT_STATUS will be cleared to  zero after writing to WDT_MODE, so we backup it in WDT_NONRST_REG,
@@ -219,7 +135,7 @@ static int mtk_reset_handler(struct notifier_block *this, unsigned long mode,
 		mdelay(5);
 	}
 
-	return NOTIFY_DONE;
+	return 0;
 }
 
 static int mtk_wdt_ping(struct watchdog_device *wdt_dev)
@@ -301,6 +217,7 @@ static const struct watchdog_ops mtk_wdt_ops = {
 	.stop		= mtk_wdt_stop,
 	.ping		= mtk_wdt_ping,
 	.set_timeout	= mtk_wdt_set_timeout,
+	.restart	= mtk_wdt_restart,
 };
 
 static void wdt_report_info(void)
@@ -378,6 +295,7 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 
 	watchdog_init_timeout(&mtk_wdt->wdt_dev, timeout, &pdev->dev);
 	watchdog_set_nowayout(&mtk_wdt->wdt_dev, nowayout);
+	watchdog_set_restart_priority(&mtk_wdt->wdt_dev, 128);
 
 	watchdog_set_drvdata(&mtk_wdt->wdt_dev, mtk_wdt);
 
@@ -386,13 +304,6 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 	err = watchdog_register_device(&mtk_wdt->wdt_dev);
 	if (unlikely(err))
 		return err;
-
-	mtk_wdt->restart_handler.notifier_call = mtk_reset_handler;
-	mtk_wdt->restart_handler.priority = 128;
-	err = register_restart_handler(&mtk_wdt->restart_handler);
-	if (err)
-		dev_warn(&pdev->dev,
-			"cannot register restart handler (err=%d)\n", err);
 
 	dev_info(&pdev->dev, "Watchdog enabled (timeout=%d sec, nowayout=%d)\n",
 			mtk_wdt->wdt_dev.timeout, nowayout);
@@ -426,8 +337,6 @@ static void mtk_wdt_shutdown(struct platform_device *pdev)
 static int mtk_wdt_remove(struct platform_device *pdev)
 {
 	struct mtk_wdt_dev *mtk_wdt = platform_get_drvdata(pdev);
-
-	unregister_restart_handler(&mtk_wdt->restart_handler);
 
 	watchdog_unregister_device(&mtk_wdt->wdt_dev);
 

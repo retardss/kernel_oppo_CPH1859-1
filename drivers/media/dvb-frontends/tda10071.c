@@ -20,7 +20,7 @@
 
 #include "tda10071_priv.h"
 
-static struct dvb_frontend_ops tda10071_ops;
+static const struct dvb_frontend_ops tda10071_ops;
 
 /*
  * XXX: regmap_update_bits() does not fit our needs as it does not support
@@ -483,10 +483,11 @@ static int tda10071_read_status(struct dvb_frontend *fe, enum fe_status *status)
 			goto error;
 
 		if (dev->delivery_system == SYS_DVBS) {
-			dev->dvbv3_ber = buf[0] << 24 | buf[1] << 16 |
-					 buf[2] << 8 | buf[3] << 0;
-			dev->post_bit_error += buf[0] << 24 | buf[1] << 16 |
-					       buf[2] << 8 | buf[3] << 0;
+			u32 bit_error = buf[0] << 24 | buf[1] << 16 |
+					buf[2] << 8 | buf[3] << 0;
+
+			dev->dvbv3_ber = bit_error;
+			dev->post_bit_error += bit_error;
 			c->post_bit_error.stat[0].scale = FE_SCALE_COUNTER;
 			c->post_bit_error.stat[0].uvalue = dev->post_bit_error;
 			dev->block_error += buf[4] << 8 | buf[5] << 0;
@@ -701,11 +702,11 @@ error:
 	return ret;
 }
 
-static int tda10071_get_frontend(struct dvb_frontend *fe)
+static int tda10071_get_frontend(struct dvb_frontend *fe,
+				 struct dtv_frontend_properties *c)
 {
 	struct tda10071_dev *dev = fe->demodulator_priv;
 	struct i2c_client *client = dev->client;
-	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
 	int ret, i;
 	u8 buf[5], tmp;
 
@@ -1102,7 +1103,7 @@ static int tda10071_get_tune_settings(struct dvb_frontend *fe,
 	return 0;
 }
 
-static struct dvb_frontend_ops tda10071_ops = {
+static const struct dvb_frontend_ops tda10071_ops = {
 	.delsys = { SYS_DVBS, SYS_DVBS2 },
 	.info = {
 		.name = "NXP TDA10071",

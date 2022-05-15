@@ -344,12 +344,12 @@ static ssize_t snd_info_text_entry_write(struct file *file,
 		}
 	}
 	if (next > buf->len) {
-		char *nbuf = krealloc(buf->buffer, PAGE_ALIGN(next),
-				      GFP_KERNEL | __GFP_ZERO);
+		char *nbuf = kvzalloc(PAGE_ALIGN(next), GFP_KERNEL);
 		if (!nbuf) {
 			err = -ENOMEM;
 			goto error;
 		}
+		kvfree(buf->buffer);
 		buf->buffer = nbuf;
 		buf->len = PAGE_ALIGN(next);
 	}
@@ -427,7 +427,7 @@ static int snd_info_text_entry_release(struct inode *inode, struct file *file)
 	single_release(inode, file);
 	kfree(data->rbuffer);
 	if (data->wbuffer) {
-		kfree(data->wbuffer->buffer);
+		kvfree(data->wbuffer->buffer);
 		kfree(data->wbuffer);
 	}
 
@@ -446,12 +446,23 @@ static const struct file_operations snd_info_text_entry_ops =
 	.read =			seq_read,
 };
 
-static struct snd_info_entry *create_subdir(struct module *mod,
-					    const char *name)
+/*
+ * snd_info_create_subdir - create and register a subdir for a given parent
+ * @mod: the module pointer
+ * @name: the module name
+ * @parent: the parent directory
+ *
+ * Creates and registers new subdir entry inside a given parent.
+ *
+ * Return: The pointer of the new instance, or NULL on failure.
+ */
+struct snd_info_entry *snd_info_create_subdir(struct module *mod,
+					      const char *name,
+					      struct snd_info_entry *parent)
 {
 	struct snd_info_entry *entry;
 
-	entry = snd_info_create_module_entry(mod, name, NULL);
+	entry = snd_info_create_module_entry(mod, name, parent);
 	if (!entry)
 		return NULL;
 	entry->mode = S_IFDIR | S_IRUGO | S_IXUGO;
@@ -461,6 +472,7 @@ static struct snd_info_entry *create_subdir(struct module *mod,
 	}
 	return entry;
 }
+EXPORT_SYMBOL(snd_info_create_subdir);
 
 static struct snd_info_entry *
 snd_info_create_entry(const char *name, struct snd_info_entry *parent);
@@ -475,12 +487,12 @@ int __init snd_info_init(void)
 	if (!snd_proc_root->p)
 		goto error;
 #ifdef CONFIG_SND_OSSEMUL
-	snd_oss_root = create_subdir(THIS_MODULE, "oss");
+	snd_oss_root = snd_info_create_subdir(THIS_MODULE, "oss", NULL);
 	if (!snd_oss_root)
 		goto error;
 #endif
 #if IS_ENABLED(CONFIG_SND_SEQUENCER)
-	snd_seq_root = create_subdir(THIS_MODULE, "seq");
+	snd_seq_root = snd_info_create_subdir(THIS_MODULE, "seq", NULL);
 	if (!snd_seq_root)
 		goto error;
 #endif
@@ -516,7 +528,7 @@ int snd_info_card_create(struct snd_card *card)
 		return -ENXIO;
 
 	sprintf(str, "card%i", card->number);
-	entry = create_subdir(card->module, str);
+	entry = snd_info_create_subdir(card->module, str, NULL);
 	if (!entry)
 		return -ENOMEM;
 	card->proc_root = entry;
@@ -619,7 +631,6 @@ int snd_info_card_free(struct snd_card *card)
 	return 0;
 }
 
-
 /**
  * snd_info_get_line - read one line from the procfs buffer
  * @buffer: the procfs buffer
@@ -634,7 +645,9 @@ int snd_info_get_line(struct snd_info_buffer *buffer, char *line, int len)
 {
 	int c = -1;
 
-	if (snd_BUG_ON(!buffer || !buffer->buffer))
+	if (snd_BUG_ON(!buffer))
+		return 1;
+	if (!buffer->buffer)
 		return 1;
 	if (len <= 0 || buffer->stop || buffer->error)
 		return 1;
@@ -652,7 +665,6 @@ int snd_info_get_line(struct snd_info_buffer *buffer, char *line, int len)
 	*line = '\0';
 	return 0;
 }
-
 EXPORT_SYMBOL(snd_info_get_line);
 
 /**
@@ -690,7 +702,6 @@ const char *snd_info_get_str(char *dest, const char *src, int len)
 		src++;
 	return src;
 }
-
 EXPORT_SYMBOL(snd_info_get_str);
 
 /*
@@ -724,8 +735,11 @@ snd_info_create_entry(const char *name, struct snd_info_entry *parent)
 	INIT_LIST_HEAD(&entry->children);
 	INIT_LIST_HEAD(&entry->list);
 	entry->parent = parent;
-	if (parent)
+	if (parent) {
+		mutex_lock(&parent->access);
 		list_add_tail(&entry->list, &parent->children);
+		mutex_unlock(&parent->access);
+	}
 	return entry;
 }
 
@@ -748,7 +762,6 @@ struct snd_info_entry *snd_info_create_module_entry(struct module * module,
 		entry->module = module;
 	return entry;
 }
-
 EXPORT_SYMBOL(snd_info_create_module_entry);
 
 /**
@@ -772,7 +785,6 @@ struct snd_info_entry *snd_info_create_card_entry(struct snd_card *card,
 	}
 	return entry;
 }
-
 EXPORT_SYMBOL(snd_info_create_card_entry);
 
 static void snd_info_disconnect(struct snd_info_entry *entry)
@@ -809,13 +821,17 @@ void snd_info_free_entry(struct snd_info_entry * entry)
 	list_for_each_entry_safe(p, n, &entry->children, list)
 		snd_info_free_entry(p);
 
-	list_del(&entry->list);
+	p = entry->parent;
+	if (p) {
+		mutex_lock(&p->access);
+		list_del(&entry->list);
+		mutex_unlock(&p->access);
+	}
 	kfree(entry->name);
 	if (entry->private_free)
 		entry->private_free(entry);
 	kfree(entry);
 }
-
 EXPORT_SYMBOL(snd_info_free_entry);
 
 /**
@@ -858,7 +874,6 @@ int snd_info_register(struct snd_info_entry * entry)
 	mutex_unlock(&info_mutex);
 	return 0;
 }
-
 EXPORT_SYMBOL(snd_info_register);
 
 /*

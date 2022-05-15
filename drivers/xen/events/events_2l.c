@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Xen event channels (2-level ABI)
  *
@@ -9,7 +10,6 @@
 #include <linux/linkage.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
-#include <linux/module.h>
 
 #include <asm/sync_bitops.h>
 #include <asm/xen/hypercall.h>
@@ -38,8 +38,9 @@
 /* Find the first set bit in a evtchn mask */
 #define EVTCHN_FIRST_BIT(w) find_first_bit(BM(&(w)), BITS_PER_EVTCHN_WORD)
 
-static DEFINE_PER_CPU(xen_ulong_t [EVTCHN_2L_NR_CHANNELS/BITS_PER_EVTCHN_WORD],
-		      cpu_evtchn_mask);
+#define EVTCHN_MASK_SIZE (EVTCHN_2L_NR_CHANNELS/BITS_PER_EVTCHN_WORD)
+
+static DEFINE_PER_CPU(xen_ulong_t [EVTCHN_MASK_SIZE], cpu_evtchn_mask);
 
 static unsigned evtchn_2l_max_channels(void)
 {
@@ -89,6 +90,8 @@ static void evtchn_2l_unmask(unsigned port)
 	int do_hypercall = 0, evtchn_pending = 0;
 
 	BUG_ON(!irqs_disabled());
+
+	smp_wmb();	/* All writes before unmask must be visible. */
 
 	if (unlikely((cpu != cpu_from_evtchn(port))))
 		do_hypercall = 1;
@@ -158,7 +161,7 @@ static inline xen_ulong_t active_evtchns(unsigned int cpu,
  * a bitset of words which contain pending event bits.  The second
  * level is a bitset of pending events themselves.
  */
-static void evtchn_2l_handle_events(unsigned cpu)
+static void evtchn_2l_handle_events(unsigned cpu, struct evtchn_loop_ctrl *ctrl)
 {
 	int irq;
 	xen_ulong_t pending_words;
@@ -239,10 +242,7 @@ static void evtchn_2l_handle_events(unsigned cpu)
 
 			/* Process port. */
 			port = (word_idx * BITS_PER_EVTCHN_WORD) + bit_idx;
-			irq = get_evtchn_to_irq(port);
-
-			if (irq != -1)
-				generic_handle_irq(irq);
+			handle_irq_for_port(port, ctrl);
 
 			bit_idx = (bit_idx + 1) % BITS_PER_EVTCHN_WORD;
 

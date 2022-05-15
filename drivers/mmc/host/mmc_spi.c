@@ -819,6 +819,10 @@ mmc_spi_readblock(struct mmc_spi_host *host, struct spi_transfer *t,
 	}
 
 	status = spi_sync_locked(spi, &host->m);
+	if (status < 0) {
+		dev_dbg(&spi->dev, "read error %d\n", status);
+		return status;
+	}
 
 	if (host->dma_dev) {
 		dma_sync_single_for_cpu(host->dma_dev,
@@ -888,10 +892,7 @@ mmc_spi_data_do(struct mmc_spi_host *host, struct mmc_command *cmd,
 	u32			clock_rate;
 	unsigned long		timeout;
 
-	if (data->flags & MMC_DATA_READ)
-		direction = DMA_FROM_DEVICE;
-	else
-		direction = DMA_TO_DEVICE;
+	direction = mmc_get_dma_dir(data);
 	mmc_spi_setup_data_message(host, multiple, direction);
 	t = &host->t;
 
@@ -925,6 +926,10 @@ mmc_spi_data_do(struct mmc_spi_host *host, struct mmc_command *cmd,
 
 			dma_addr = dma_map_page(dma_dev, sg_page(sg), 0,
 						PAGE_SIZE, dir);
+			if (dma_mapping_error(dma_dev, dma_addr)) {
+				data->error = -EFAULT;
+				break;
+			}
 			if (direction == DMA_TO_DEVICE)
 				t->tx_dma = dma_addr + sg->offset;
 			else
@@ -1149,17 +1154,22 @@ static void mmc_spi_initsequence(struct mmc_spi_host *host)
 	 * SPI protocol.  Another is that when chipselect is released while
 	 * the card returns BUSY status, the clock must issue several cycles
 	 * with chipselect high before the card will stop driving its output.
+	 *
+	 * SPI_CS_HIGH means "asserted" here. In some cases like when using
+	 * GPIOs for chip select, SPI_CS_HIGH is set but this will be logically
+	 * inverted by gpiolib, so if we want to ascertain to drive it high
+	 * we should toggle the default with an XOR as we do here.
 	 */
-	host->spi->mode |= SPI_CS_HIGH;
+	host->spi->mode ^= SPI_CS_HIGH;
 	if (spi_setup(host->spi) != 0) {
 		/* Just warn; most cards work without it. */
 		dev_warn(&host->spi->dev,
 				"can't change chip-select polarity\n");
-		host->spi->mode &= ~SPI_CS_HIGH;
+		host->spi->mode ^= SPI_CS_HIGH;
 	} else {
 		mmc_spi_readbytes(host, 18);
 
-		host->spi->mode &= ~SPI_CS_HIGH;
+		host->spi->mode ^= SPI_CS_HIGH;
 		if (spi_setup(host->spi) != 0) {
 			/* Wot, we can't get the same setup we had before? */
 			dev_err(&host->spi->dev,
@@ -1393,10 +1403,12 @@ static int mmc_spi_probe(struct spi_device *spi)
 		host->dma_dev = dev;
 		host->ones_dma = dma_map_single(dev, ones,
 				MMC_SPI_BLOCKSIZE, DMA_TO_DEVICE);
+		if (dma_mapping_error(dev, host->ones_dma))
+			goto fail_ones_dma;
 		host->data_dma = dma_map_single(dev, host->data,
 				sizeof(*host->data), DMA_BIDIRECTIONAL);
-
-		/* REVISIT in theory those map operations can fail... */
+		if (dma_mapping_error(dev, host->data_dma))
+			goto fail_data_dma;
 
 		dma_sync_single_for_cpu(host->dma_dev,
 				host->data_dma, sizeof(*host->data),
@@ -1444,6 +1456,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 		mmc->caps &= ~MMC_CAP_NEEDS_POLL;
 		mmc_gpiod_request_cd_irq(mmc);
 	}
+	mmc_detect_change(mmc, 0);
 
 	if (host->pdata && host->pdata->flags & MMC_SPI_USE_RO_GPIO) {
 		has_ro = true;
@@ -1468,6 +1481,11 @@ fail_glue_init:
 	if (host->dma_dev)
 		dma_unmap_single(host->dma_dev, host->data_dma,
 				sizeof(*host->data), DMA_BIDIRECTIONAL);
+fail_data_dma:
+	if (host->dma_dev)
+		dma_unmap_single(host->dma_dev, host->ones_dma,
+				MMC_SPI_BLOCKSIZE, DMA_TO_DEVICE);
+fail_ones_dma:
 	kfree(host->data);
 
 fail_nobuf1:

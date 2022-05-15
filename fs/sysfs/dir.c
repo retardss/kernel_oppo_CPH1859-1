@@ -21,14 +21,14 @@ DEFINE_SPINLOCK(sysfs_symlink_target_lock);
 
 void sysfs_warn_dup(struct kernfs_node *parent, const char *name)
 {
-	char *buf, *path = NULL;
+	char *buf;
 
 	buf = kzalloc(PATH_MAX, GFP_KERNEL);
 	if (buf)
-		path = kernfs_path(parent, buf, PATH_MAX);
+		kernfs_path(parent, buf, PATH_MAX);
 
 	WARN(1, KERN_WARNING "sysfs: cannot create duplicate filename '%s/%s'\n",
-	     path, name);
+	     buf, name);
 
 	kfree(buf);
 }
@@ -42,7 +42,8 @@ int sysfs_create_dir_ns(struct kobject *kobj, const void *ns)
 {
 	struct kernfs_node *parent, *kn;
 
-	BUG_ON(!kobj);
+	if (WARN_ON(!kobj))
+		return -EINVAL;
 
 	if (kobj->parent)
 		parent = kobj->parent->sd;

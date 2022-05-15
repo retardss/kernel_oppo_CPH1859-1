@@ -21,21 +21,6 @@
 #include <linux/mutex.h>
 #include <linux/errno.h>
 
-#undef VERBOSE
-
-#ifdef VERBOSE
-#define VDBG(fmt, args...) pr_debug("[%s]  " fmt , \
-				 __func__, ## args)
-#else
-#define VDBG(stuff...)	do {} while (0)
-#endif
-
-#ifdef VERBOSE
-#define MPC_LOC printk("Current Location [%s]:[%d]\n", __FILE__, __LINE__)
-#else
-#define MPC_LOC do {} while (0)
-#endif
-
 #define PROTO_UNDEF	(0)
 #define PROTO_HOST	(1)
 #define PROTO_GADGET	(2)
@@ -153,31 +138,32 @@ struct otg_fsm {
 	int id;
 	int adp_change;
 	int power_up;
-	int test_device;
-	int a_bus_drop;
-	int a_bus_req;
 	int a_srp_det;
 	int a_vbus_vld;
 	int b_conn;
 	int a_bus_resume;
 	int a_bus_suspend;
 	int a_conn;
-	int b_bus_req;
 	int b_se0_srp;
 	int b_ssend_srp;
 	int b_sess_vld;
+	int test_device;
+	int a_bus_drop;
+	int a_bus_req;
+	int b_bus_req;
+
 	/* Auxilary inputs */
 	int a_sess_vld;
 	int b_bus_resume;
 	int b_bus_suspend;
 
 	/* Output */
-	int data_pulse;
 	int drv_vbus;
 	int loc_conn;
 	int loc_sof;
 	int adp_prb;
 	int adp_sns;
+	int data_pulse;
 
 	/* Internal variables */
 	int a_set_b_hnp_en;
@@ -185,7 +171,7 @@ struct otg_fsm {
 	int b_hnp_enable;
 	int a_clr_err;
 
-	/* Informative variables */
+	/* Informative variables. All unused as of now */
 	int a_bus_drop_inf;
 	int a_bus_req_inf;
 	int a_clr_err_inf;

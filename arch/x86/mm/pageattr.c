@@ -15,15 +15,16 @@
 #include <linux/pci.h>
 #include <linux/vmalloc.h>
 
-#include <asm/e820.h>
+#include <asm/e820/api.h>
 #include <asm/processor.h>
 #include <asm/tlbflush.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/pgalloc.h>
 #include <asm/proto.h>
 #include <asm/pat.h>
+#include <asm/set_memory.h>
 
 /*
  * The current flushing context - we pass it instead of 5 arguments:
@@ -67,6 +68,9 @@ void update_page_count(int level, unsigned long pages)
 
 static void split_page_count(int level)
 {
+	if (direct_pages_count[level] == 0)
+		return;
+
 	direct_pages_count[level]--;
 	direct_pages_count[level - 1] += PTRS_PER_PTE;
 }
@@ -99,21 +103,22 @@ static inline unsigned long highmap_start_pfn(void)
 
 static inline unsigned long highmap_end_pfn(void)
 {
-	return __pa_symbol(roundup(_brk_end, PMD_SIZE)) >> PAGE_SHIFT;
+	/* Do not reference physical address outside the kernel. */
+	return __pa_symbol(roundup(_brk_end, PMD_SIZE) - 1) >> PAGE_SHIFT;
 }
 
-#endif
-
-#ifdef CONFIG_DEBUG_PAGEALLOC
-# define debug_pagealloc 1
-#else
-# define debug_pagealloc 0
 #endif
 
 static inline int
 within(unsigned long addr, unsigned long start, unsigned long end)
 {
 	return addr >= start && addr < end;
+}
+
+static inline int
+within_inclusive(unsigned long addr, unsigned long start, unsigned long end)
+{
+	return addr >= start && addr <= end;
 }
 
 /*
@@ -130,19 +135,27 @@ within(unsigned long addr, unsigned long start, unsigned long end)
  */
 void clflush_cache_range(void *vaddr, unsigned int size)
 {
-	unsigned long clflush_mask = boot_cpu_data.x86_clflush_size - 1;
+	const unsigned long clflush_size = boot_cpu_data.x86_clflush_size;
+	void *p = (void *)((unsigned long)vaddr & ~(clflush_size - 1));
 	void *vend = vaddr + size;
-	void *p;
+
+	if (p >= vend)
+		return;
 
 	mb();
 
-	for (p = (void *)((unsigned long)vaddr & ~clflush_mask);
-	     p < vend; p += boot_cpu_data.x86_clflush_size)
+	for (; p < vend; p += clflush_size)
 		clflushopt(p);
 
 	mb();
 }
 EXPORT_SYMBOL_GPL(clflush_cache_range);
+
+void arch_invalidate_pmem(void *addr, size_t size)
+{
+	clflush_cache_range(addr, size);
+}
+EXPORT_SYMBOL_GPL(arch_invalidate_pmem);
 
 static void __cpa_flush_all(void *arg)
 {
@@ -180,7 +193,7 @@ static void cpa_flush_range(unsigned long start, int numpages, int cache)
 	unsigned int i, level;
 	unsigned long addr;
 
-	BUG_ON(irqs_disabled());
+	BUG_ON(irqs_disabled() && !early_boot_irqs_disabled);
 	WARN_ON(PAGE_ALIGN(start) != start);
 
 	on_each_cpu(__cpa_flush_range, NULL, 1);
@@ -209,7 +222,20 @@ static void cpa_flush_array(unsigned long *start, int numpages, int cache,
 			    int in_flags, struct page **pages)
 {
 	unsigned int i, level;
+#ifdef CONFIG_PREEMPT
+	/*
+	 * Avoid wbinvd() because it causes latencies on all CPUs,
+	 * regardless of any CPU isolation that may be in effect.
+	 *
+	 * This should be extended for CAT enabled systems independent of
+	 * PREEMPT because wbinvd() does not respect the CAT partitions and
+	 * this is exposed to unpriviledged users through the graphics
+	 * subsystem.
+	 */
+	unsigned long do_wbinvd = 0;
+#else
 	unsigned long do_wbinvd = cache && numpages >= 1024; /* 4M threshold */
+#endif
 
 	BUG_ON(irqs_disabled());
 
@@ -273,9 +299,11 @@ static inline pgprot_t static_protections(pgprot_t prot, unsigned long address,
 
 	/*
 	 * The .rodata section needs to be read-only. Using the pfn
-	 * catches all aliases.
+	 * catches all aliases.  This also includes __ro_after_init,
+	 * so do not enforce until kernel_set_to_readonly is true.
 	 */
-	if (within(pfn, __pa_symbol(__start_rodata) >> PAGE_SHIFT,
+	if (kernel_set_to_readonly &&
+	    within(pfn, __pa_symbol(__start_rodata) >> PAGE_SHIFT,
 		   __pa_symbol(__end_rodata) >> PAGE_SHIFT))
 		pgprot_val(forbidden) |= _PAGE_RW;
 
@@ -328,6 +356,7 @@ static inline pgprot_t static_protections(pgprot_t prot, unsigned long address,
 pte_t *lookup_address_in_pgd(pgd_t *pgd, unsigned long address,
 			     unsigned int *level)
 {
+	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
 
@@ -336,7 +365,15 @@ pte_t *lookup_address_in_pgd(pgd_t *pgd, unsigned long address,
 	if (pgd_none(*pgd))
 		return NULL;
 
-	pud = pud_offset(pgd, address);
+	p4d = p4d_offset(pgd, address);
+	if (p4d_none(*p4d))
+		return NULL;
+
+	*level = PG_LEVEL_512G;
+	if (p4d_large(*p4d) || !p4d_present(*p4d))
+		return (pte_t *)p4d;
+
+	pud = pud_offset(p4d, address);
 	if (pud_none(*pud))
 		return NULL;
 
@@ -388,13 +425,18 @@ static pte_t *_lookup_address_cpa(struct cpa_data *cpa, unsigned long address,
 pmd_t *lookup_pmd_address(unsigned long address)
 {
 	pgd_t *pgd;
+	p4d_t *p4d;
 	pud_t *pud;
 
 	pgd = pgd_offset_k(address);
 	if (pgd_none(*pgd))
 		return NULL;
 
-	pud = pud_offset(pgd, address);
+	p4d = p4d_offset(pgd, address);
+	if (p4d_none(*p4d) || p4d_large(*p4d) || !p4d_present(*p4d))
+		return NULL;
+
+	pud = pud_offset(p4d, address);
 	if (pud_none(*pud) || pud_large(*pud) || !pud_present(*pud))
 		return NULL;
 
@@ -459,11 +501,13 @@ static void __set_pmd_pte(pte_t *kpte, unsigned long address, pte_t pte)
 
 		list_for_each_entry(page, &pgd_list, lru) {
 			pgd_t *pgd;
+			p4d_t *p4d;
 			pud_t *pud;
 			pmd_t *pmd;
 
 			pgd = (pgd_t *)page_address(page) + pgd_index(address);
-			pud = pud_offset(pgd, address);
+			p4d = p4d_offset(pgd, address);
+			pud = pud_offset(p4d, address);
 			pmd = pmd_offset(pud, address);
 			set_pte_atomic((pte_t *)pmd, pte);
 		}
@@ -710,10 +754,10 @@ static int split_large_page(struct cpa_data *cpa, pte_t *kpte,
 {
 	struct page *base;
 
-	if (!debug_pagealloc)
+	if (!debug_pagealloc_enabled())
 		spin_unlock(&cpa_lock);
-	base = alloc_pages(GFP_KERNEL | __GFP_NOTRACK, 0);
-	if (!debug_pagealloc)
+	base = alloc_pages(GFP_KERNEL, 0);
+	if (!debug_pagealloc_enabled())
 		spin_lock(&cpa_lock);
 	if (!base)
 		return -ENOMEM;
@@ -754,21 +798,7 @@ static bool try_to_free_pmd_page(struct cpa_data *cpa, pmd_t *pmd)
 	return true;
 }
 
-static bool try_to_free_pud_page(pud_t *pud)
-{
-	int i;
-
-	for (i = 0; i < PTRS_PER_PUD; i++)
-		if (!pud_none(pud[i]))
-			return false;
-
-	free_page((unsigned long)pud);
-	return true;
-}
-
-static bool unmap_pte_range(struct cpa_data *cpa, pmd_t *pmd,
-			    unsigned long start,
-			    unsigned long end)
+static bool unmap_pte_range(pmd_t *pmd, unsigned long start, unsigned long end)
 {
 	pte_t *pte = pte_offset_kernel(pmd, start);
 
@@ -840,11 +870,9 @@ static void unmap_pmd_range(struct cpa_data *cpa, pud_t *pud,
 			pud_clear(pud);
 }
 
-static void __unmap_pud_range(struct cpa_data *cpa, pgd_t *pgd,
-			      unsigned long start,
-			      unsigned long end)
+static void unmap_pud_range(p4d_t *p4d, unsigned long start, unsigned long end)
 {
-	pud_t *pud = pud_offset(pgd, start);
+	pud_t *pud = pud_offset(p4d, start);
 
 	/*
 	 * Not on a GB page boundary?
@@ -885,37 +913,9 @@ static void __unmap_pud_range(struct cpa_data *cpa, pgd_t *pgd,
 	 */
 }
 
-static void unmap_pud_range(pgd_t *pgd, unsigned long start, unsigned long end)
-{
-	struct cpa_data cpa = {
-		.flags = CPA_FREE_PAGETABLES,
-	};
-
-	__unmap_pud_range(&cpa, pgd, start, end);
-}
-
-void unmap_pud_range_nofree(pgd_t *pgd, unsigned long start, unsigned long end)
-{
-	struct cpa_data cpa = {
-		.flags = 0,
-	};
-
-	__unmap_pud_range(&cpa, pgd, start, end);
-}
-
-static void unmap_pgd_range(pgd_t *root, unsigned long addr, unsigned long end)
-{
-	pgd_t *pgd_entry = root + pgd_index(addr);
-
-	unmap_pud_range(pgd_entry, addr, end);
-
-	if (try_to_free_pud_page((pud_t *)pgd_page_vaddr(*pgd_entry)))
-		pgd_clear(pgd_entry);
-}
-
 static int alloc_pte_page(pmd_t *pmd)
 {
-	pte_t *pte = (pte_t *)get_zeroed_page(GFP_KERNEL | __GFP_NOTRACK);
+	pte_t *pte = (pte_t *)get_zeroed_page(GFP_KERNEL);
 	if (!pte)
 		return -1;
 
@@ -925,7 +925,7 @@ static int alloc_pte_page(pmd_t *pmd)
 
 static int alloc_pmd_page(pud_t *pud)
 {
-	pmd_t *pmd = (pmd_t *)get_zeroed_page(GFP_KERNEL | __GFP_NOTRACK);
+	pmd_t *pmd = (pmd_t *)get_zeroed_page(GFP_KERNEL);
 	if (!pmd)
 		return -1;
 
@@ -941,16 +941,25 @@ static void populate_pte(struct cpa_data *cpa,
 
 	pte = pte_offset_kernel(pmd, start);
 
+	/*
+	 * Set the GLOBAL flags only if the PRESENT flag is
+	 * set otherwise pte_present will return true even on
+	 * a non present pte. The canon_pgprot will clear
+	 * _PAGE_GLOBAL for the ancient hardware that doesn't
+	 * support it.
+	 */
+	if (pgprot_val(pgprot) & _PAGE_PRESENT)
+		pgprot_val(pgprot) |= _PAGE_GLOBAL;
+	else
+		pgprot_val(pgprot) &= ~_PAGE_GLOBAL;
+
+	pgprot = canon_pgprot(pgprot);
+
 	while (num_pages-- && start < end) {
-
-		/* deal with the NX bit */
-		if (!(pgprot_val(pgprot) & _PAGE_NX))
-			cpa->pfn &= ~_PAGE_NX;
-
-		set_pte(pte, pfn_pte(cpa->pfn >> PAGE_SHIFT, pgprot));
+		set_pte(pte, pfn_pte(cpa->pfn, pgprot));
 
 		start	 += PAGE_SIZE;
-		cpa->pfn += PAGE_SIZE;
+		cpa->pfn++;
 		pte++;
 	}
 }
@@ -1006,11 +1015,11 @@ static long populate_pmd(struct cpa_data *cpa,
 
 		pmd = pmd_offset(pud, start);
 
-		set_pmd(pmd, pmd_mkhuge(pfn_pmd(cpa->pfn >> PAGE_SHIFT,
+		set_pmd(pmd, pmd_mkhuge(pfn_pmd(cpa->pfn,
 					canon_pgprot(pmd_pgprot))));
 
 		start	  += PMD_SIZE;
-		cpa->pfn  += PMD_SIZE;
+		cpa->pfn  += PMD_SIZE >> PAGE_SHIFT;
 		cur_pages += PMD_SIZE >> PAGE_SHIFT;
 	}
 
@@ -1029,8 +1038,8 @@ static long populate_pmd(struct cpa_data *cpa,
 	return num_pages;
 }
 
-static long populate_pud(struct cpa_data *cpa, unsigned long start, pgd_t *pgd,
-			 pgprot_t pgprot)
+static int populate_pud(struct cpa_data *cpa, unsigned long start, p4d_t *p4d,
+			pgprot_t pgprot)
 {
 	pud_t *pud;
 	unsigned long end;
@@ -1051,7 +1060,7 @@ static long populate_pud(struct cpa_data *cpa, unsigned long start, pgd_t *pgd,
 		cur_pages = (pre_end - start) >> PAGE_SHIFT;
 		cur_pages = min_t(int, (int)cpa->numpages, cur_pages);
 
-		pud = pud_offset(pgd, start);
+		pud = pud_offset(p4d, start);
 
 		/*
 		 * Need a PMD page?
@@ -1072,18 +1081,18 @@ static long populate_pud(struct cpa_data *cpa, unsigned long start, pgd_t *pgd,
 	if (cpa->numpages == cur_pages)
 		return cur_pages;
 
-	pud = pud_offset(pgd, start);
+	pud = pud_offset(p4d, start);
 	pud_pgprot = pgprot_4k_2_large(pgprot);
 
 	/*
 	 * Map everything starting from the Gb boundary, possibly with 1G pages
 	 */
-	while (end - start >= PUD_SIZE) {
-		set_pud(pud, pud_mkhuge(pfn_pud(cpa->pfn >> PAGE_SHIFT,
+	while (boot_cpu_has(X86_FEATURE_GBPAGES) && end - start >= PUD_SIZE) {
+		set_pud(pud, pud_mkhuge(pfn_pud(cpa->pfn,
 				   canon_pgprot(pud_pgprot))));
 
 		start	  += PUD_SIZE;
-		cpa->pfn  += PUD_SIZE;
+		cpa->pfn  += PUD_SIZE >> PAGE_SHIFT;
 		cur_pages += PUD_SIZE >> PAGE_SHIFT;
 		pud++;
 	}
@@ -1092,7 +1101,7 @@ static long populate_pud(struct cpa_data *cpa, unsigned long start, pgd_t *pgd,
 	if (start < end) {
 		long tmp;
 
-		pud = pud_offset(pgd, start);
+		pud = pud_offset(p4d, start);
 		if (pud_none(*pud))
 			if (alloc_pmd_page(pud))
 				return -1;
@@ -1115,28 +1124,43 @@ static int populate_pgd(struct cpa_data *cpa, unsigned long addr)
 {
 	pgprot_t pgprot = __pgprot(_KERNPG_TABLE);
 	pud_t *pud = NULL;	/* shut up gcc */
+	p4d_t *p4d;
 	pgd_t *pgd_entry;
 	long ret;
 
 	pgd_entry = cpa->pgd + pgd_index(addr);
 
+	if (pgd_none(*pgd_entry)) {
+		p4d = (p4d_t *)get_zeroed_page(GFP_KERNEL);
+		if (!p4d)
+			return -1;
+
+		set_pgd(pgd_entry, __pgd(__pa(p4d) | _KERNPG_TABLE));
+	}
+
 	/*
 	 * Allocate a PUD page and hand it down for mapping.
 	 */
-	if (pgd_none(*pgd_entry)) {
-		pud = (pud_t *)get_zeroed_page(GFP_KERNEL | __GFP_NOTRACK);
+	p4d = p4d_offset(pgd_entry, addr);
+	if (p4d_none(*p4d)) {
+		pud = (pud_t *)get_zeroed_page(GFP_KERNEL);
 		if (!pud)
 			return -1;
 
-		set_pgd(pgd_entry, __pgd(__pa(pud) | _KERNPG_TABLE));
+		set_p4d(p4d, __p4d(__pa(pud) | _KERNPG_TABLE));
 	}
 
 	pgprot_val(pgprot) &= ~pgprot_val(cpa->mask_clr);
 	pgprot_val(pgprot) |=  pgprot_val(cpa->mask_set);
 
-	ret = populate_pud(cpa, addr, pgd_entry, pgprot);
+	ret = populate_pud(cpa, addr, p4d, pgprot);
 	if (ret < 0) {
-		unmap_pgd_range(cpa->pgd, addr,
+		/*
+		 * Leave the PUD page in place in case some other CPU or thread
+		 * already found it, but remove any useless entries we just
+		 * added to it.
+		 */
+		unmap_pud_range(p4d, addr,
 				addr + (cpa->numpages << PAGE_SHIFT));
 		return ret;
 	}
@@ -1148,14 +1172,22 @@ static int populate_pgd(struct cpa_data *cpa, unsigned long addr)
 static int __cpa_process_fault(struct cpa_data *cpa, unsigned long vaddr,
 			       int primary)
 {
-	if (cpa->pgd)
+	if (cpa->pgd) {
+		/*
+		 * Right now, we only execute this code path when mapping
+		 * the EFI virtual memory map regions, no other users
+		 * provide a ->pgd value. This may change in the future.
+		 */
 		return populate_pgd(cpa, vaddr);
+	}
 
 	/*
 	 * Ignore all non primary paths.
 	 */
-	if (!primary)
+	if (!primary) {
+		cpa->numpages = 1;
 		return 0;
+	}
 
 	/*
 	 * Ignore the NULL PTE for kernel identity mapping, as it is expected
@@ -1200,7 +1232,7 @@ repeat:
 		return __cpa_process_fault(cpa, address, primary);
 
 	old_pte = *kpte;
-	if (!pte_val(old_pte))
+	if (pte_none(old_pte))
 		return __cpa_process_fault(cpa, address, primary);
 
 	if (level == PG_LEVEL_4K) {
@@ -1331,7 +1363,8 @@ static int cpa_process_alias(struct cpa_data *cpa)
 	 * to touch the high mapped kernel as well:
 	 */
 	if (!within(vaddr, (unsigned long)_text, _brk_end) &&
-	    within(cpa->pfn, highmap_start_pfn(), highmap_end_pfn())) {
+	    within_inclusive(cpa->pfn, highmap_start_pfn(),
+			     highmap_end_pfn())) {
 		unsigned long temp_cpa_vaddr = (cpa->pfn << PAGE_SHIFT) +
 					       __START_KERNEL_map - phys_base;
 		alias_cpa = *cpa;
@@ -1364,10 +1397,10 @@ static int __change_page_attr_set_clr(struct cpa_data *cpa, int checkalias)
 		if (cpa->flags & (CPA_ARRAY | CPA_PAGES_ARRAY))
 			cpa->numpages = 1;
 
-		if (!debug_pagealloc)
+		if (!debug_pagealloc_enabled())
 			spin_lock(&cpa_lock);
 		ret = __change_page_attr(cpa, checkalias);
-		if (!debug_pagealloc)
+		if (!debug_pagealloc_enabled())
 			spin_unlock(&cpa_lock);
 		if (ret)
 			return ret;
@@ -1482,7 +1515,7 @@ static int change_page_attr_set_clr(unsigned long *addr, int numpages,
 	 * error case we fall back to cpa_flush_all (which uses
 	 * WBINVD):
 	 */
-	if (!ret && cpu_has_clflush) {
+	if (!ret && boot_cpu_has(X86_FEATURE_CLFLUSH)) {
 		if (cpa.flags & (CPA_PAGES_ARRAY | CPA_ARRAY)) {
 			cpa_flush_array(addr, numpages, cache,
 					cpa.flags, pages);
@@ -1753,6 +1786,70 @@ int set_memory_4k(unsigned long addr, int numpages)
 					__pgprot(0), 1, 0, NULL);
 }
 
+static int __set_memory_enc_dec(unsigned long addr, int numpages, bool enc)
+{
+	struct cpa_data cpa;
+	unsigned long start;
+	int ret;
+
+	/* Nothing to do if the SME is not active */
+	if (!sme_active())
+		return 0;
+
+	/* Should not be working on unaligned addresses */
+	if (WARN_ONCE(addr & ~PAGE_MASK, "misaligned address: %#lx\n", addr))
+		addr &= PAGE_MASK;
+
+	start = addr;
+
+	memset(&cpa, 0, sizeof(cpa));
+	cpa.vaddr = &addr;
+	cpa.numpages = numpages;
+	cpa.mask_set = enc ? __pgprot(_PAGE_ENC) : __pgprot(0);
+	cpa.mask_clr = enc ? __pgprot(0) : __pgprot(_PAGE_ENC);
+	cpa.pgd = init_mm.pgd;
+
+	/* Must avoid aliasing mappings in the highmem code */
+	kmap_flush_unused();
+	vm_unmap_aliases();
+
+	/*
+	 * Before changing the encryption attribute, we need to flush caches.
+	 */
+	if (static_cpu_has(X86_FEATURE_CLFLUSH))
+		cpa_flush_range(start, numpages, 1);
+	else
+		cpa_flush_all(1);
+
+	ret = __change_page_attr_set_clr(&cpa, 1);
+
+	/*
+	 * After changing the encryption attribute, we need to flush TLBs
+	 * again in case any speculative TLB caching occurred (but no need
+	 * to flush caches again).  We could just use cpa_flush_all(), but
+	 * in case TLB flushing gets optimized in the cpa_flush_range()
+	 * path use the same logic as above.
+	 */
+	if (static_cpu_has(X86_FEATURE_CLFLUSH))
+		cpa_flush_range(start, numpages, 0);
+	else
+		cpa_flush_all(0);
+
+	return ret;
+}
+
+int set_memory_encrypted(unsigned long addr, int numpages)
+{
+	return __set_memory_enc_dec(addr, numpages, true);
+}
+EXPORT_SYMBOL_GPL(set_memory_encrypted);
+
+int set_memory_decrypted(unsigned long addr, int numpages)
+{
+	return __set_memory_enc_dec(addr, numpages, false);
+}
+EXPORT_SYMBOL_GPL(set_memory_decrypted);
+
 int set_pages_uc(struct page *page, int numpages)
 {
 	unsigned long addr = (unsigned long)page_address(page);
@@ -1949,9 +2046,13 @@ void __kernel_map_pages(struct page *page, int numpages, int enable)
 
 	/*
 	 * We should perform an IPI and flush all tlbs,
-	 * but that can deadlock->flush only current cpu:
+	 * but that can deadlock->flush only current cpu.
+	 * Preemption needs to be disabled around __flush_tlb_all() due to
+	 * CR3 reload in __native_flush_tlb().
 	 */
+	preempt_disable();
 	__flush_tlb_all();
+	preempt_enable();
 
 	arch_flush_lazy_mmu_mode();
 }
@@ -1985,15 +2086,15 @@ int kernel_map_pages_in_pgd(pgd_t *pgd, u64 pfn, unsigned long address,
 		.pgd = pgd,
 		.numpages = numpages,
 		.mask_set = __pgprot(0),
-		.mask_clr = __pgprot(0),
+		.mask_clr = __pgprot(~page_flags & (_PAGE_NX|_PAGE_RW)),
 		.flags = 0,
 	};
 
 	if (!(__supported_pte_mask & _PAGE_NX))
 		goto out;
 
-	if (!(page_flags & _PAGE_NX))
-		cpa.mask_clr = __pgprot(_PAGE_NX);
+	if (!(page_flags & _PAGE_ENC))
+		cpa.mask_clr = pgprot_encrypted(cpa.mask_clr);
 
 	cpa.mask_set = __pgprot(_PAGE_PRESENT | page_flags);
 
@@ -2002,12 +2103,6 @@ int kernel_map_pages_in_pgd(pgd_t *pgd, u64 pfn, unsigned long address,
 
 out:
 	return retval;
-}
-
-void kernel_unmap_pages_in_pgd(pgd_t *root, unsigned long address,
-			       unsigned numpages)
-{
-	unmap_pgd_range(root, address, address + (numpages << PAGE_SHIFT));
 }
 
 /*

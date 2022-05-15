@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Tick related global functions
  */
@@ -97,42 +98,61 @@ static inline void tick_broadcast_exit(void)
 	tick_broadcast_oneshot_control(TICK_BROADCAST_EXIT);
 }
 
+enum tick_dep_bits {
+	TICK_DEP_BIT_POSIX_TIMER	= 0,
+	TICK_DEP_BIT_PERF_EVENTS	= 1,
+	TICK_DEP_BIT_SCHED		= 2,
+	TICK_DEP_BIT_CLOCK_UNSTABLE	= 3
+};
+
+#define TICK_DEP_MASK_NONE		0
+#define TICK_DEP_MASK_POSIX_TIMER	(1 << TICK_DEP_BIT_POSIX_TIMER)
+#define TICK_DEP_MASK_PERF_EVENTS	(1 << TICK_DEP_BIT_PERF_EVENTS)
+#define TICK_DEP_MASK_SCHED		(1 << TICK_DEP_BIT_SCHED)
+#define TICK_DEP_MASK_CLOCK_UNSTABLE	(1 << TICK_DEP_BIT_CLOCK_UNSTABLE)
+
 #ifdef CONFIG_NO_HZ_COMMON
+extern bool tick_nohz_enabled;
 extern int tick_nohz_tick_stopped(void);
+extern void tick_nohz_idle_stop_tick(void);
+extern void tick_nohz_idle_retain_tick(void);
+extern void tick_nohz_idle_restart_tick(void);
 extern void tick_nohz_idle_enter(void);
 extern void tick_nohz_idle_exit(void);
 extern void tick_nohz_irq_exit(void);
-extern ktime_t tick_nohz_get_sleep_length(void);
+extern bool tick_nohz_idle_got_tick(void);
+extern ktime_t tick_nohz_get_sleep_length(ktime_t *delta_next);
 extern unsigned long tick_nohz_get_idle_calls(void);
+extern unsigned long tick_nohz_get_idle_calls_cpu(int cpu);
 extern u64 get_cpu_idle_time_us(int cpu, u64 *last_update_time);
 extern u64 get_cpu_iowait_time_us(int cpu, u64 *last_update_time);
 
-#ifdef CONFIG_MEDIATEK_SOLUTION
-extern void tick_set_cpu_plugoff_flag(int flag);
-extern u64 get_cpu_idle_time_us_wo_cpuoffline(int cpu, u64 *last_update_time);
-extern u64 get_cpu_iowait_time_us_wo_cpuoffline(int cpu, u64 *last_update_time);
-#endif
+static inline void tick_nohz_idle_stop_tick_protected(void)
+{
+	local_irq_disable();
+	tick_nohz_idle_stop_tick();
+	local_irq_enable();
+}
 
 #else /* !CONFIG_NO_HZ_COMMON */
+#define tick_nohz_enabled (0)
 static inline int tick_nohz_tick_stopped(void) { return 0; }
+static inline void tick_nohz_idle_stop_tick(void) { }
+static inline void tick_nohz_idle_retain_tick(void) { }
+static inline void tick_nohz_idle_restart_tick(void) { }
 static inline void tick_nohz_idle_enter(void) { }
 static inline void tick_nohz_idle_exit(void) { }
+static inline bool tick_nohz_idle_got_tick(void) { return false; }
 
-static inline ktime_t tick_nohz_get_sleep_length(void)
+static inline ktime_t tick_nohz_get_sleep_length(ktime_t *delta_next)
 {
-	ktime_t len = { .tv64 = NSEC_PER_SEC/HZ };
-
-	return len;
+	*delta_next = TICK_NSEC;
+	return *delta_next;
 }
 static inline u64 get_cpu_idle_time_us(int cpu, u64 *unused) { return -1; }
 static inline u64 get_cpu_iowait_time_us(int cpu, u64 *unused) { return -1; }
 
-#ifdef CONFIG_MEDIATEK_SOLUTION
-static inline void tick_set_cpu_plugoff_flag(int flag) { }
-static inline u64 get_cpu_idle_time_us_wo_cpuoffline(int cpu, u64 *last_update_time) { return -1; }
-static inline u64 get_cpu_iowait_time_us_wo_cpuoffline(int cpu, u64 *last_update_time) { return -1; }
-#endif
-
+static inline void tick_nohz_idle_stop_tick_protected(void) { }
 #endif /* !CONFIG_NO_HZ_COMMON */
 
 #ifdef CONFIG_NO_HZ_FULL
@@ -167,21 +187,105 @@ static inline int housekeeping_any_cpu(void)
 	return cpumask_any_and(housekeeping_mask, cpu_online_mask);
 }
 
-extern void tick_nohz_full_kick(void);
+extern void tick_nohz_dep_set(enum tick_dep_bits bit);
+extern void tick_nohz_dep_clear(enum tick_dep_bits bit);
+extern void tick_nohz_dep_set_cpu(int cpu, enum tick_dep_bits bit);
+extern void tick_nohz_dep_clear_cpu(int cpu, enum tick_dep_bits bit);
+extern void tick_nohz_dep_set_task(struct task_struct *tsk,
+				   enum tick_dep_bits bit);
+extern void tick_nohz_dep_clear_task(struct task_struct *tsk,
+				     enum tick_dep_bits bit);
+extern void tick_nohz_dep_set_signal(struct signal_struct *signal,
+				     enum tick_dep_bits bit);
+extern void tick_nohz_dep_clear_signal(struct signal_struct *signal,
+				       enum tick_dep_bits bit);
+
+/*
+ * The below are tick_nohz_[set,clear]_dep() wrappers that optimize off-cases
+ * on top of static keys.
+ */
+static inline void tick_dep_set(enum tick_dep_bits bit)
+{
+	if (tick_nohz_full_enabled())
+		tick_nohz_dep_set(bit);
+}
+
+static inline void tick_dep_clear(enum tick_dep_bits bit)
+{
+	if (tick_nohz_full_enabled())
+		tick_nohz_dep_clear(bit);
+}
+
+static inline void tick_dep_set_cpu(int cpu, enum tick_dep_bits bit)
+{
+	if (tick_nohz_full_cpu(cpu))
+		tick_nohz_dep_set_cpu(cpu, bit);
+}
+
+static inline void tick_dep_clear_cpu(int cpu, enum tick_dep_bits bit)
+{
+	if (tick_nohz_full_cpu(cpu))
+		tick_nohz_dep_clear_cpu(cpu, bit);
+}
+
+static inline void tick_dep_set_task(struct task_struct *tsk,
+				     enum tick_dep_bits bit)
+{
+	if (tick_nohz_full_enabled())
+		tick_nohz_dep_set_task(tsk, bit);
+}
+static inline void tick_dep_clear_task(struct task_struct *tsk,
+				       enum tick_dep_bits bit)
+{
+	if (tick_nohz_full_enabled())
+		tick_nohz_dep_clear_task(tsk, bit);
+}
+static inline void tick_dep_set_signal(struct signal_struct *signal,
+				       enum tick_dep_bits bit)
+{
+	if (tick_nohz_full_enabled())
+		tick_nohz_dep_set_signal(signal, bit);
+}
+static inline void tick_dep_clear_signal(struct signal_struct *signal,
+					 enum tick_dep_bits bit)
+{
+	if (tick_nohz_full_enabled())
+		tick_nohz_dep_clear_signal(signal, bit);
+}
+
 extern void tick_nohz_full_kick_cpu(int cpu);
-extern void tick_nohz_full_kick_all(void);
 extern void __tick_nohz_task_switch(void);
 #else
 static inline int housekeeping_any_cpu(void)
 {
-	return smp_processor_id();
+	cpumask_t available;
+	int cpu;
+
+	cpumask_andnot(&available, cpu_online_mask, cpu_isolated_mask);
+	cpu = cpumask_any(&available);
+	if (cpu >= nr_cpu_ids)
+		cpu = smp_processor_id();
+
+	return cpu;
 }
 static inline bool tick_nohz_full_enabled(void) { return false; }
 static inline bool tick_nohz_full_cpu(int cpu) { return false; }
 static inline void tick_nohz_full_add_cpus_to(struct cpumask *mask) { }
+
+static inline void tick_dep_set(enum tick_dep_bits bit) { }
+static inline void tick_dep_clear(enum tick_dep_bits bit) { }
+static inline void tick_dep_set_cpu(int cpu, enum tick_dep_bits bit) { }
+static inline void tick_dep_clear_cpu(int cpu, enum tick_dep_bits bit) { }
+static inline void tick_dep_set_task(struct task_struct *tsk,
+				     enum tick_dep_bits bit) { }
+static inline void tick_dep_clear_task(struct task_struct *tsk,
+				       enum tick_dep_bits bit) { }
+static inline void tick_dep_set_signal(struct signal_struct *signal,
+				       enum tick_dep_bits bit) { }
+static inline void tick_dep_clear_signal(struct signal_struct *signal,
+					 enum tick_dep_bits bit) { }
+
 static inline void tick_nohz_full_kick_cpu(int cpu) { }
-static inline void tick_nohz_full_kick(void) { }
-static inline void tick_nohz_full_kick_all(void) { }
 static inline void __tick_nohz_task_switch(void) { }
 #endif
 
@@ -200,7 +304,7 @@ static inline bool is_housekeeping_cpu(int cpu)
 	if (tick_nohz_full_enabled())
 		return cpumask_test_cpu(cpu, housekeeping_mask);
 #endif
-	return true;
+	return !cpu_isolated(cpu);
 }
 
 static inline void housekeeping_affine(struct task_struct *t)
@@ -218,10 +322,5 @@ static inline void tick_nohz_task_switch(void)
 		__tick_nohz_task_switch();
 }
 
-#if defined(CONFIG_TICK_ONESHOT) && defined(CONFIG_MTK_RAM_CONSOLE)
-extern void tick_broadcast_mtk_aee_dump(void);
-#else
-static inline void tick_broadcast_mtk_aee_dump(void) { };
-#endif
-
+ktime_t *get_next_event_cpu(unsigned int cpu);
 #endif

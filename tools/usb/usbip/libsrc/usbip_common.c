@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2005-2007 Takahiro Hirofuchi
  */
@@ -222,7 +223,7 @@ int read_usb_interface(struct usbip_usb_device *udev, int i,
 			udev->busid, udev->bConfigurationValue, i);
 	if (size < 0 || (unsigned int)size >= sizeof(busid)) {
 		err("busid length %i >= %lu or < 0", size,
-		    (unsigned long)sizeof(busid));
+		    (long unsigned)sizeof(busid));
 		return -1;
 	}
 

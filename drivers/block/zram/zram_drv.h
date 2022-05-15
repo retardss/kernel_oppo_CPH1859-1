@@ -15,10 +15,13 @@
 #ifndef _ZRAM_DRV_H_
 #define _ZRAM_DRV_H_
 
-#include <linux/spinlock.h>
+#include <linux/rwsem.h>
 #include <linux/zsmalloc.h>
+#include <linux/crypto.h>
+#include <linux/spinlock.h>
 
 #include "zcomp.h"
+#include "zram_dedup.h"
 
 /*-- Configurable parameters */
 
@@ -39,7 +42,6 @@ static const size_t max_zpage_size = PAGE_SIZE / 4 * 3;
 
 /*-- End of configurable params */
 
-#define SECTOR_SHIFT		9
 #define SECTORS_PER_PAGE_SHIFT	(PAGE_SHIFT - SECTOR_SHIFT)
 #define SECTORS_PER_PAGE	(1 << SECTORS_PER_PAGE_SHIFT)
 #define ZRAM_LOGICAL_BLOCK_SHIFT 12
@@ -62,18 +64,30 @@ static const size_t max_zpage_size = PAGE_SIZE / 4 * 3;
 
 /* Flags for zram pages (table[page_no].value) */
 enum zram_pageflags {
-	/* Page consists entirely of zeros */
-	ZRAM_ZERO = ZRAM_FLAG_SHIFT,
+	/* Page consists the same element */
+	ZRAM_SAME = ZRAM_FLAG_SHIFT,
 	ZRAM_ACCESS,	/* page is now accessed */
+	ZRAM_WB,	/* page is stored on backing_device */
 
 	__NR_ZRAM_PAGEFLAGS,
 };
 
 /*-- Data structures */
 
+struct zram_entry {
+	struct rb_node rb_node;
+	u32 len;
+	u32 checksum;
+	unsigned long refcount;
+	unsigned long handle;
+};
+
 /* Allocated for each disk page */
 struct zram_table_entry {
-	unsigned long handle;
+	union {
+		struct zram_entry *entry;
+		unsigned long element;
+	};
 	unsigned long value;
 };
 
@@ -85,52 +99,66 @@ struct zram_stats {
 	atomic64_t failed_writes;	/* can happen when memory is too low */
 	atomic64_t invalid_io;	/* non-page-aligned I/O requests */
 	atomic64_t notify_free;	/* no. of swap slot free notifications */
-	atomic64_t zero_pages;		/* no. of zero filled pages */
+	atomic64_t same_pages;		/* no. of same element filled pages */
 	atomic64_t pages_stored;	/* no. of pages currently stored */
 	atomic_long_t max_used_pages;	/* no. of maximum pages stored */
+	atomic64_t writestall;		/* no. of write slow paths */
+	atomic64_t dup_data_size;	/*
+					 * compressed size of pages
+					 * duplicated
+					 */
+	atomic64_t meta_data_size;	/* size of zram_entries */
 };
 
-struct zram_meta {
-	struct zram_table_entry *table;
-	struct zs_pool *mem_pool;
+struct zram_hash {
+	spinlock_t lock;
+	struct rb_root rb_root;
 };
 
 struct zram {
-	struct zram_meta *meta;
+	struct zram_table_entry *table;
+	struct zs_pool *mem_pool;
 	struct zcomp *comp;
 	struct gendisk *disk;
+	struct zram_hash *hash;
+	size_t hash_size;
 	/* Prevent concurrent execution of device init */
 	struct rw_semaphore init_lock;
 	/*
 	 * the number of pages zram can consume for storing compressed data
 	 */
 	unsigned long limit_pages;
-	int max_comp_streams;
 
 	struct zram_stats stats;
-	atomic_t refcount; /* refcount for zram_meta */
-	/* wait all IO under all of cpu are done */
-	wait_queue_head_t io_done;
 	/*
 	 * This is the limit on amount of *uncompressed* worth of data
 	 * we can store in a disk.
 	 */
 	u64 disksize;	/* bytes */
-	char compressor[10];
+	char compressor[CRYPTO_MAX_ALG_NAME];
 	/*
 	 * zram is claimed so open request will be failed
 	 */
 	bool claim; /* Protected by bdev->bd_mutex */
+	bool use_dedup;
+#ifdef CONFIG_ZRAM_WRITEBACK
+	struct file *backing_dev;
+	struct block_device *bdev;
+	unsigned int old_block_size;
+	unsigned long *bitmap;
+	unsigned long nr_pages;
+	spinlock_t bitmap_lock;
+#endif
 };
 
-/* mlog */
-unsigned long zram_mlog(void);
-
-#ifdef CONFIG_HWZRAM_DRV
-extern unsigned long hwzram_mem_used_total(void);
-#ifdef CONFIG_PROC_FS
-extern void hwzraminfo_proc_show(struct seq_file *m, void *v);
+static inline bool zram_dedup_enabled(struct zram *zram)
+{
+#ifdef CONFIG_ZRAM_DEDUP
+	return zram->use_dedup;
+#else
+	return false;
 #endif
-#endif
+}
 
+void zram_entry_free(struct zram *zram, struct zram_entry *entry);
 #endif

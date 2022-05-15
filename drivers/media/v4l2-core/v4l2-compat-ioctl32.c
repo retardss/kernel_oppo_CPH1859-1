@@ -139,6 +139,7 @@ struct v4l2_format32 {
 		struct v4l2_vbi_format	vbi;
 		struct v4l2_sliced_vbi_format	sliced;
 		struct v4l2_sdr_format	sdr;
+		struct v4l2_meta_format	meta;
 		__u8	raw_data[200];        /* user-defined */
 	} fmt;
 };
@@ -226,6 +227,9 @@ static int __get_v4l2_format32(struct v4l2_format __user *kp,
 	case V4L2_BUF_TYPE_SDR_OUTPUT:
 		return copy_in_user(&kp->fmt.sdr, &up->fmt.sdr,
 				    sizeof(kp->fmt.sdr)) ? -EFAULT : 0;
+	case V4L2_BUF_TYPE_META_CAPTURE:
+		return copy_in_user(&kp->fmt.meta, &up->fmt.meta,
+				    sizeof(kp->fmt.meta)) ? -EFAULT : 0;
 	default:
 		return -EINVAL;
 	}
@@ -292,6 +296,9 @@ static int __put_v4l2_format32(struct v4l2_format __user *kp,
 	case V4L2_BUF_TYPE_SDR_OUTPUT:
 		return copy_in_user(&up->fmt.sdr, &kp->fmt.sdr,
 				    sizeof(kp->fmt.sdr)) ? -EFAULT : 0;
+	case V4L2_BUF_TYPE_META_CAPTURE:
+		return copy_in_user(&up->fmt.meta, &kp->fmt.meta,
+				    sizeof(kp->fmt.meta)) ? -EFAULT : 0;
 	default:
 		return -EINVAL;
 	}
@@ -393,7 +400,11 @@ static int get_v4l2_plane32(struct v4l2_plane __user *up,
 
 	if (copy_in_user(up, up32, 2 * sizeof(__u32)) ||
 	    copy_in_user(&up->data_offset, &up32->data_offset,
-			 sizeof(up->data_offset)))
+			 sizeof(up->data_offset)) ||
+	    copy_in_user(up->reserved, up32->reserved,
+			 sizeof(up->reserved)) ||
+	    copy_in_user(&up->length, &up32->length,
+			 sizeof(up->length)))
 		return -EFAULT;
 
 	switch (memory) {
@@ -425,7 +436,9 @@ static int put_v4l2_plane32(struct v4l2_plane __user *up,
 
 	if (copy_in_user(up32, up, 2 * sizeof(__u32)) ||
 	    copy_in_user(&up32->data_offset, &up->data_offset,
-			 sizeof(up->data_offset)))
+			 sizeof(up->data_offset)) ||
+	    copy_in_user(up32->reserved, up->reserved,
+			 sizeof(up->reserved)))
 		return -EFAULT;
 
 	switch (memory) {
@@ -724,7 +737,7 @@ static inline int put_v4l2_input32(struct v4l2_input __user *kp,
 }
 
 struct v4l2_ext_controls32 {
-	__u32 ctrl_class;
+	__u32 which;
 	__u32 count;
 	__u32 error_idx;
 	__u32 reserved[2];
@@ -798,7 +811,7 @@ static int get_v4l2_ext_controls32(struct file *file,
 	compat_caddr_t p;
 
 	if (!access_ok(VERIFY_READ, up, sizeof(*up)) ||
-	    assign_in_user(&kp->ctrl_class, &up->ctrl_class) ||
+	    assign_in_user(&kp->which, &up->which) ||
 	    get_user(count, &up->count) ||
 	    put_user(count, &kp->count) ||
 	    assign_in_user(&kp->error_idx, &up->error_idx) ||
@@ -856,7 +869,7 @@ static int put_v4l2_ext_controls32(struct file *file,
 	compat_caddr_t p;
 
 	if (!access_ok(VERIFY_WRITE, up, sizeof(*up)) ||
-	    assign_in_user(&up->ctrl_class, &kp->ctrl_class) ||
+	    assign_in_user(&up->which, &kp->which) ||
 	    get_user(count, &kp->count) ||
 	    put_user(count, &up->count) ||
 	    assign_in_user(&up->error_idx, &kp->error_idx) ||

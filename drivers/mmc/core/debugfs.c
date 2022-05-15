@@ -15,11 +15,14 @@
 #include <linux/slab.h>
 #include <linux/stat.h>
 #include <linux/fault-inject.h>
+#include <linux/uaccess.h>
 
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
 
 #include "core.h"
+#include "card.h"
+#include "host.h"
 #include "mmc_ops.h"
 
 #ifdef CONFIG_FAIL_MMC_REQUEST
@@ -31,6 +34,26 @@ module_param(fail_request, charp, 0);
 #endif /* CONFIG_FAIL_MMC_REQUEST */
 
 /* The debugfs functions are optimized away when CONFIG_DEBUG_FS isn't set. */
+static int mmc_ring_buffer_show(struct seq_file *s, void *data)
+{
+	struct mmc_host *mmc = s->private;
+
+	mmc_dump_trace_buffer(mmc, s);
+	return 0;
+}
+
+static int mmc_ring_buffer_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, mmc_ring_buffer_show, inode->i_private);
+}
+
+static const struct file_operations mmc_ring_buffer_fops = {
+	.open		= mmc_ring_buffer_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 static int mmc_ios_show(struct seq_file *s, void *data)
 {
 	static const char *vdd_str[] = {
@@ -148,7 +171,8 @@ static int mmc_ios_show(struct seq_file *s, void *data)
 		str = "mmc HS200";
 		break;
 	case MMC_TIMING_MMC_HS400:
-		str = "mmc HS400";
+		str = mmc_card_hs400es(host->card) ?
+			"mmc HS400 enhanced strobe" : "mmc HS400";
 		break;
 	default:
 		str = "invalid";
@@ -170,7 +194,7 @@ static int mmc_ios_show(struct seq_file *s, void *data)
 		str = "invalid";
 		break;
 	}
-	seq_printf(s, "signal voltage:\t%u (%s)\n", ios->chip_select, str);
+	seq_printf(s, "signal voltage:\t%u (%s)\n", ios->signal_voltage, str);
 
 	switch (ios->drv_type) {
 	case MMC_SET_DRIVER_TYPE_A:
@@ -220,7 +244,7 @@ static int mmc_clock_opt_set(void *data, u64 val)
 	struct mmc_host *host = data;
 
 	/* We need this check due to input value is u64 */
-	if (val > host->f_max)
+	if (val != 0 && (val > host->f_max || val < host->f_min))
 		return -EINVAL;
 
 	mmc_claim_host(host);
@@ -232,6 +256,205 @@ static int mmc_clock_opt_set(void *data, u64 val)
 
 DEFINE_SIMPLE_ATTRIBUTE(mmc_clock_fops, mmc_clock_opt_get, mmc_clock_opt_set,
 	"%llu\n");
+
+#include <linux/delay.h>
+
+static int mmc_scale_get(void *data, u64 *val)
+{
+	struct mmc_host *host = data;
+
+	*val = host->clk_scaling.curr_freq;
+
+	return 0;
+}
+
+static int mmc_scale_set(void *data, u64 val)
+{
+	int err = 0;
+	struct mmc_host *host = data;
+
+	mmc_claim_host(host);
+	mmc_host_clk_hold(host);
+
+	/* change frequency from sysfs manually */
+	err = mmc_clk_update_freq(host, val, host->clk_scaling.state);
+	if (err == -EAGAIN)
+		err = 0;
+	else if (err)
+		pr_err("%s: clock scale to %llu failed with error %d\n",
+			mmc_hostname(host), val, err);
+	else
+		pr_debug("%s: clock change to %llu finished successfully (%s)\n",
+			mmc_hostname(host), val, current->comm);
+
+	mmc_host_clk_release(host);
+	mmc_release_host(host);
+
+	return err;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(mmc_scale_fops, mmc_scale_get, mmc_scale_set,
+	"%llu\n");
+
+static int mmc_max_clock_get(void *data, u64 *val)
+{
+	struct mmc_host *host = data;
+
+	if (!host)
+		return -EINVAL;
+
+	*val = host->f_max;
+
+	return 0;
+}
+
+static int mmc_max_clock_set(void *data, u64 val)
+{
+	struct mmc_host *host = data;
+	int err = -EINVAL;
+	unsigned long freq = val;
+	unsigned int old_freq;
+
+	if (!host || (val < host->f_min))
+		goto out;
+
+	mmc_claim_host(host);
+	if (host->bus_ops && host->bus_ops->change_bus_speed) {
+		old_freq = host->f_max;
+		host->f_max = freq;
+
+		err = host->bus_ops->change_bus_speed(host, &freq);
+
+		if (err)
+			host->f_max = old_freq;
+	}
+	mmc_release_host(host);
+out:
+	return err;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(mmc_max_clock_fops, mmc_max_clock_get,
+		mmc_max_clock_set, "%llu\n");
+
+static int mmc_force_err_set(void *data, u64 val)
+{
+	struct mmc_host *host = data;
+
+	if (host && host->card && host->ops &&
+			host->ops->force_err_irq) {
+		/*
+		 * To access the force error irq reg, we need to make
+		 * sure the host is powered up and host clock is ticking.
+		 */
+		mmc_get_card(host->card);
+		host->ops->force_err_irq(host, val);
+		mmc_put_card(host->card);
+	}
+
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(mmc_force_err_fops, NULL, mmc_force_err_set, "%llu\n");
+
+static int mmc_err_state_get(void *data, u64 *val)
+{
+	struct mmc_host *host = data;
+
+	if (!host)
+		return -EINVAL;
+
+	*val = host->err_occurred ? 1 : 0;
+
+	return 0;
+}
+
+static int mmc_err_state_clear(void *data, u64 val)
+{
+	struct mmc_host *host = data;
+
+	if (!host)
+		return -EINVAL;
+
+	host->err_occurred = false;
+
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(mmc_err_state, mmc_err_state_get,
+		mmc_err_state_clear, "%llu\n");
+
+static int mmc_err_stats_show(struct seq_file *file, void *data)
+{
+	struct mmc_host *host = (struct mmc_host *)file->private;
+
+	if (!host)
+		return -EINVAL;
+
+	seq_printf(file, "# Command Timeout Occurred:\t %d\n",
+		   host->err_stats[MMC_ERR_CMD_TIMEOUT]);
+
+	seq_printf(file, "# Command CRC Errors Occurred:\t %d\n",
+		   host->err_stats[MMC_ERR_CMD_CRC]);
+
+	seq_printf(file, "# Data Timeout Occurred:\t %d\n",
+		   host->err_stats[MMC_ERR_DAT_TIMEOUT]);
+
+	seq_printf(file, "# Data CRC Errors Occurred:\t %d\n",
+		   host->err_stats[MMC_ERR_DAT_CRC]);
+
+	seq_printf(file, "# Auto-Cmd Error Occurred:\t %d\n",
+		   host->err_stats[MMC_ERR_ADMA]);
+
+	seq_printf(file, "# ADMA Error Occurred:\t %d\n",
+		   host->err_stats[MMC_ERR_ADMA]);
+
+	seq_printf(file, "# Tuning Error Occurred:\t %d\n",
+		   host->err_stats[MMC_ERR_TUNING]);
+
+	seq_printf(file, "# CMDQ RED Errors:\t\t %d\n",
+		   host->err_stats[MMC_ERR_CMDQ_RED]);
+
+	seq_printf(file, "# CMDQ GCE Errors:\t\t %d\n",
+		   host->err_stats[MMC_ERR_CMDQ_GCE]);
+
+	seq_printf(file, "# CMDQ ICCE Errors:\t\t %d\n",
+		   host->err_stats[MMC_ERR_CMDQ_ICCE]);
+
+	seq_printf(file, "# Request Timedout:\t %d\n",
+		   host->err_stats[MMC_ERR_REQ_TIMEOUT]);
+
+	seq_printf(file, "# CMDQ Request Timedout:\t %d\n",
+		   host->err_stats[MMC_ERR_CMDQ_REQ_TIMEOUT]);
+
+	seq_printf(file, "# ICE Config Errors:\t\t %d\n",
+		   host->err_stats[MMC_ERR_ICE_CFG]);
+	return 0;
+}
+
+static int mmc_err_stats_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, mmc_err_stats_show, inode->i_private);
+}
+
+static ssize_t mmc_err_stats_write(struct file *filp, const char __user *ubuf,
+				   size_t cnt, loff_t *ppos)
+{
+	struct mmc_host *host = filp->f_mapping->host->i_private;
+
+	if (!host)
+		return -EINVAL;
+
+	pr_debug("%s: Resetting MMC error statistics", __func__);
+	memset(host->err_stats, 0, sizeof(host->err_stats));
+
+	return cnt;
+}
+
+static const struct file_operations mmc_err_stats_fops = {
+	.open	= mmc_err_stats_open,
+	.read	= seq_read,
+	.write	= mmc_err_stats_write,
+};
 
 void mmc_add_host_debugfs(struct mmc_host *host)
 {
@@ -248,13 +471,54 @@ void mmc_add_host_debugfs(struct mmc_host *host)
 
 	host->debugfs_root = root;
 
-	if (!debugfs_create_file("ios", S_IRUSR, root, host, &mmc_ios_fops))
+	if (!debugfs_create_file("ios", 0400, root, host, &mmc_ios_fops))
 		goto err_node;
 
-	if (!debugfs_create_file("clock", S_IRUSR | S_IWUSR, root, host,
+	if (!debugfs_create_file("clock", 0600, root, host,
 			&mmc_clock_fops))
 		goto err_node;
 
+	if (!debugfs_create_file("max_clock", 0600, root, host,
+		&mmc_max_clock_fops))
+		goto err_node;
+
+	if (!debugfs_create_file("scale", 0600, root, host,
+		&mmc_scale_fops))
+		goto err_node;
+
+	if (!debugfs_create_bool("skip_clk_scale_freq_update",
+		0600, root,
+		&host->clk_scaling.skip_clk_scale_freq_update))
+		goto err_node;
+
+	if (!debugfs_create_bool("cmdq_task_history",
+		0600, root,
+		&host->cmdq_thist_enabled))
+		goto err_node;
+
+	if (!debugfs_create_bool("crash_on_err",
+		0600, root,
+		&host->crash_on_err))
+		goto err_node;
+
+#ifdef CONFIG_MMC_RING_BUFFER
+	if (!debugfs_create_file("ring_buffer", 0400,
+				root, host, &mmc_ring_buffer_fops))
+		goto err_node;
+#endif
+	if (!debugfs_create_file("err_state", 0600, root, host,
+		&mmc_err_state))
+		goto err_node;
+
+	if (!debugfs_create_file("err_stats", 0600, root, host,
+		&mmc_err_stats_fops))
+		goto err_node;
+
+#ifdef CONFIG_MMC_CLKGATE
+	if (!debugfs_create_u32("clk_delay", 0600,
+				root, &host->clk_delay))
+		goto err_node;
+#endif
 #ifdef CONFIG_FAIL_MMC_REQUEST
 	if (fail_request)
 		setup_fault_attr(&fail_default_attr, fail_request);
@@ -264,6 +528,10 @@ void mmc_add_host_debugfs(struct mmc_host *host)
 					     &host->fail_mmc_request)))
 		goto err_node;
 #endif
+	if (!debugfs_create_file("force_error", 0200, root, host,
+		&mmc_force_err_fops))
+		goto err_node;
+
 	return;
 
 err_node:
@@ -278,79 +546,87 @@ void mmc_remove_host_debugfs(struct mmc_host *host)
 	debugfs_remove_recursive(host->debugfs_root);
 }
 
-static int mmc_dbg_card_status_get(void *data, u64 *val)
+static int mmc_bkops_stats_read(struct seq_file *file, void *data)
 {
-	struct mmc_card	*card = data;
-	u32		status;
-	int		ret;
+	struct mmc_card *card = file->private;
+	struct mmc_bkops_stats *stats;
+	int i;
 
-	mmc_get_card(card);
+	if (!card)
+		return -EINVAL;
 
-	ret = mmc_send_status(data, &status);
-	if (!ret)
-		*val = status;
+	stats = &card->bkops.stats;
 
-	mmc_put_card(card);
+	if (!stats->enabled) {
+		pr_info("%s: bkops statistics are disabled\n",
+			 mmc_hostname(card->host));
+		goto exit;
+	}
 
-	return ret;
-}
-DEFINE_SIMPLE_ATTRIBUTE(mmc_dbg_card_status_fops, mmc_dbg_card_status_get,
-		NULL, "%08llx\n");
+	spin_lock(&stats->lock);
 
-#define EXT_CSD_STR_LEN 1025
+	seq_printf(file, "%s: bkops statistics:\n",
+			mmc_hostname(card->host));
+	seq_printf(file, "%s: BKOPS: sent START_BKOPS to device: %u\n",
+			mmc_hostname(card->host), stats->manual_start);
+	seq_printf(file, "%s: BKOPS: stopped due to HPI: %u\n",
+			mmc_hostname(card->host), stats->hpi);
+	seq_printf(file, "%s: BKOPS: sent AUTO_EN set to 1: %u\n",
+			mmc_hostname(card->host), stats->auto_start);
+	seq_printf(file, "%s: BKOPS: sent AUTO_EN set to 0: %u\n",
+			mmc_hostname(card->host), stats->auto_stop);
 
-static int mmc_ext_csd_open(struct inode *inode, struct file *filp)
-{
-	struct mmc_card *card = inode->i_private;
-	char *buf;
-	ssize_t n = 0;
-	u8 *ext_csd;
-	int err, i;
+	for (i = 0 ; i < MMC_BKOPS_NUM_SEVERITY_LEVELS ; ++i)
+		seq_printf(file, "%s: BKOPS: due to level %d: %u\n",
+			 mmc_hostname(card->host), i, stats->level[i]);
 
-	buf = kmalloc(EXT_CSD_STR_LEN + 1, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
+	spin_unlock(&stats->lock);
 
-	mmc_get_card(card);
-	err = mmc_get_ext_csd(card, &ext_csd);
-	mmc_put_card(card);
-	if (err)
-		goto out_free;
+exit:
 
-	for (i = 0; i < 512; i++)
-		n += sprintf(buf + n, "%02x", ext_csd[i]);
-	n += sprintf(buf + n, "\n");
-	BUG_ON(n != EXT_CSD_STR_LEN);
-
-	filp->private_data = buf;
-	kfree(ext_csd);
-	return 0;
-
-out_free:
-	kfree(buf);
-	return err;
-}
-
-static ssize_t mmc_ext_csd_read(struct file *filp, char __user *ubuf,
-				size_t cnt, loff_t *ppos)
-{
-	char *buf = filp->private_data;
-
-	return simple_read_from_buffer(ubuf, cnt, ppos,
-				       buf, EXT_CSD_STR_LEN);
-}
-
-static int mmc_ext_csd_release(struct inode *inode, struct file *file)
-{
-	kfree(file->private_data);
 	return 0;
 }
 
-static const struct file_operations mmc_dbg_ext_csd_fops = {
-	.open		= mmc_ext_csd_open,
-	.read		= mmc_ext_csd_read,
-	.release	= mmc_ext_csd_release,
-	.llseek		= default_llseek,
+static ssize_t mmc_bkops_stats_write(struct file *filp,
+				      const char __user *ubuf, size_t cnt,
+				      loff_t *ppos)
+{
+	struct mmc_card *card = filp->f_mapping->host->i_private;
+	int value;
+	struct mmc_bkops_stats *stats;
+	int err;
+
+	if (!card)
+		return cnt;
+
+	stats = &card->bkops.stats;
+
+	err = kstrtoint_from_user(ubuf, cnt, 0, &value);
+	if (err) {
+		pr_err("%s: %s: error parsing input from user (%d)\n",
+				mmc_hostname(card->host), __func__, err);
+		return err;
+	}
+	if (value) {
+		mmc_blk_init_bkops_statistics(card);
+	} else {
+		spin_lock(&stats->lock);
+		stats->enabled = false;
+		spin_unlock(&stats->lock);
+	}
+
+	return cnt;
+}
+
+static int mmc_bkops_stats_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, mmc_bkops_stats_read, inode->i_private);
+}
+
+static const struct file_operations mmc_dbg_bkops_stats_fops = {
+	.open		= mmc_bkops_stats_open,
+	.read		= seq_read,
+	.write		= mmc_bkops_stats_write,
 };
 
 #ifdef VENDOR_EDIT
@@ -633,17 +909,14 @@ void mmc_add_card_debugfs(struct mmc_card *card)
 
 	card->debugfs_root = root;
 
-	if (!debugfs_create_x32("state", S_IRUSR, root, &card->state))
+	if (!debugfs_create_x32("state", 0400, root, &card->state))
 		goto err;
 
-	if (mmc_card_mmc(card) || mmc_card_sd(card))
-		if (!debugfs_create_file("status", S_IRUSR, root, card,
-					&mmc_dbg_card_status_fops))
-			goto err;
-
-	if (mmc_card_mmc(card))
-		if (!debugfs_create_file("ext_csd", S_IRUSR, root, card,
-					&mmc_dbg_ext_csd_fops))
+	if (mmc_card_mmc(card) && (card->ext_csd.rev >= 5) &&
+	    (mmc_card_configured_auto_bkops(card) ||
+	     mmc_card_configured_manual_bkops(card)))
+		if (!debugfs_create_file("bkops_stats", 0400, root, card,
+					 &mmc_dbg_bkops_stats_fops))
 			goto err;
 #ifdef VENDOR_EDIT
 //Chunyi.Mei@PSW.BSP.Storage.EMMC,2018/9/12,add for emmc life&size display
@@ -669,4 +942,5 @@ err:
 void mmc_remove_card_debugfs(struct mmc_card *card)
 {
 	debugfs_remove_recursive(card->debugfs_root);
+	card->debugfs_root = NULL;
 }

@@ -148,8 +148,10 @@ static int configure_kgdboc(void)
 	char *cptr = config;
 	struct console *cons;
 
-	if (!strlen(config) || isspace(config[0]))
+	if (!strlen(config) || isspace(config[0])) {
+		err = 0;
 		goto noconfig;
+	}
 
 	kgdboc_io_ops.is_console = 0;
 	kgdb_tty_driver = NULL;
@@ -230,7 +232,8 @@ static void kgdboc_put_char(u8 chr)
 					kgdb_tty_line, chr);
 }
 
-static int param_set_kgdboc_var(const char *kmessage, struct kernel_param *kp)
+static int param_set_kgdboc_var(const char *kmessage,
+				const struct kernel_param *kp)
 {
 	size_t len = strlen(kmessage);
 

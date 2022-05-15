@@ -23,19 +23,11 @@
 
 #include <linux/compiler.h>
 
-#ifdef CONFIG_ARM64_4K_PAGES
-#define THREAD_SIZE_ORDER	2
-#elif defined(CONFIG_ARM64_16K_PAGES)
-#define THREAD_SIZE_ORDER	0
-#endif
-
-#define THREAD_SIZE		16384
-#define THREAD_START_SP		(THREAD_SIZE - 16)
-
 #ifndef __ASSEMBLY__
 
 struct task_struct;
 
+#include <asm/memory.h>
 #include <asm/stack_pointer.h>
 #include <asm/types.h>
 
@@ -46,19 +38,12 @@ typedef unsigned long mm_segment_t;
  */
 struct thread_info {
 	unsigned long		flags;		/* low level flags */
+	unsigned long		padding[7];
 	mm_segment_t		addr_limit;	/* address limit */
-#ifndef CONFIG_THREAD_INFO_IN_TASK
-	struct task_struct	*task;		/* main task structure */
-#endif
 #ifdef CONFIG_ARM64_SW_TTBR0_PAN
 	u64			ttbr0;		/* saved TTBR0_EL1 */
 #endif
 	int			preempt_count;	/* 0 => preemptable, <0 => bug */
-#ifndef CONFIG_THREAD_INFO_IN_TASK
-	int			cpu;		/* cpu */
-#endif
-	void			*regs_on_excp;	/* aee */
-	int			cpu_excp;	/* aee */
 };
 
 #ifdef CONFIG_THREAD_INFO_IN_TASK
@@ -71,32 +56,10 @@ struct thread_info {
 #else
 #define INIT_THREAD_INFO(tsk)						\
 {									\
-	.task		= &tsk,						\
-	.flags		= 0,						\
 	.preempt_count	= INIT_PREEMPT_COUNT,				\
 	.addr_limit	= KERNEL_DS,					\
 	.cpu_excp	= 0,			/* aee */		\
 }
-
-/*
- * how to get the thread information struct from C
- */
-static inline struct thread_info *current_thread_info(void) __attribute_const__;
-
-/*
- * struct thread_info can be accessed directly via sp_el0.
- */
-static inline struct thread_info *current_thread_info(void)
-{
-	unsigned long sp_el0;
-
-	asm ("mrs %0, sp_el0" : "=r" (sp_el0));
-
-	return (struct thread_info *)sp_el0;
-}
-
-#define init_thread_info	(init_thread_union.thread_info)
-#endif
 
 #define init_stack		(init_thread_union.stack)
 
@@ -106,6 +69,9 @@ static inline struct thread_info *current_thread_info(void)
 	((unsigned long)(tsk->thread.cpu_context.sp))
 #define thread_saved_fp(tsk)	\
 	((unsigned long)(tsk->thread.cpu_context.fp))
+
+void arch_setup_new_exec(void);
+#define arch_setup_new_exec     arch_setup_new_exec
 
 #endif
 
@@ -124,6 +90,8 @@ static inline struct thread_info *current_thread_info(void)
 #define TIF_NEED_RESCHED	1
 #define TIF_NOTIFY_RESUME	2	/* callback before returning to user */
 #define TIF_FOREIGN_FPSTATE	3	/* CPU's FP state is not current's */
+#define TIF_UPROBE		4	/* uprobe breakpoint or singlestep */
+#define TIF_FSCHECK		5	/* Check FS is USER_DS on return */
 #define TIF_NOHZ		7
 #define TIF_SYSCALL_TRACE	8
 #define TIF_SYSCALL_AUDIT	9
@@ -134,6 +102,8 @@ static inline struct thread_info *current_thread_info(void)
 #define TIF_RESTORE_SIGMASK	20
 #define TIF_SINGLESTEP		21
 #define TIF_32BIT		22	/* 32bit process */
+#define TIF_SSBD		23	/* Wants SSB mitigation */
+#define TIF_MM_RELEASED		24
 
 #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
 #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
@@ -144,10 +114,13 @@ static inline struct thread_info *current_thread_info(void)
 #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
 #define _TIF_SYSCALL_TRACEPOINT	(1 << TIF_SYSCALL_TRACEPOINT)
 #define _TIF_SECCOMP		(1 << TIF_SECCOMP)
+#define _TIF_UPROBE		(1 << TIF_UPROBE)
+#define _TIF_FSCHECK		(1 << TIF_FSCHECK)
 #define _TIF_32BIT		(1 << TIF_32BIT)
 
 #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
-				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE)
+				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE | \
+				 _TIF_UPROBE | _TIF_FSCHECK)
 
 #define _TIF_SYSCALL_WORK	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
 				 _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP | \

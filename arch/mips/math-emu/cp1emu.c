@@ -35,7 +35,6 @@
  */
 #include <linux/sched.h>
 #include <linux/debugfs.h>
-#include <linux/kconfig.h>
 #include <linux/percpu-defs.h>
 #include <linux/perf_event.h>
 
@@ -43,7 +42,7 @@
 #include <asm/inst.h>
 #include <asm/ptrace.h>
 #include <asm/signal.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <asm/cpu-info.h>
 #include <asm/processor.h>
@@ -59,7 +58,7 @@ static int fpu_emu(struct pt_regs *, struct mips_fpu_struct *,
 	mips_instruction);
 
 static int fpux_emu(struct pt_regs *,
-	struct mips_fpu_struct *, mips_instruction, void *__user *);
+	struct mips_fpu_struct *, mips_instruction, void __user **);
 
 /* Control registers */
 
@@ -452,7 +451,7 @@ int isBranchInstr(struct pt_regs *regs, struct mm_decoded_insn dec_insn,
 					regs->cp0_epc + dec_insn.pc_inc +
 					dec_insn.next_pc_inc;
 			}
-			/* fall through */
+			/* Fall through */
 		case jr_op:
 			/* For R6, JR already emulated in jalr_op */
 			if (NO_R6EMU && insn.r_format.func == jr_op)
@@ -794,10 +793,10 @@ int isBranchInstr(struct pt_regs *regs, struct mm_decoded_insn dec_insn,
  */
 static inline int cop1_64bit(struct pt_regs *xcp)
 {
-	if (config_enabled(CONFIG_64BIT) && !config_enabled(CONFIG_MIPS32_O32))
+	if (IS_ENABLED(CONFIG_64BIT) && !IS_ENABLED(CONFIG_MIPS32_O32))
 		return 1;
-	else if (config_enabled(CONFIG_32BIT) &&
-		 !config_enabled(CONFIG_MIPS_O32_FP64_SUPPORT))
+	else if (IS_ENABLED(CONFIG_32BIT) &&
+		 !IS_ENABLED(CONFIG_MIPS_O32_FP64_SUPPORT))
 		return 0;
 
 	return !test_thread_flag(TIF_32BIT_FPREGS);
@@ -843,7 +842,7 @@ do {									\
 
 #define DITOREG(di, x)							\
 do {									\
-	unsigned int fpr, i;						\
+	unsigned fpr, i;						\
 	fpr = (x) & ~(cop1_64bit(xcp) ^ 1);				\
 	set_fpr64(&ctx->fpr[fpr], 0, di);				\
 	for (i = 1; i < ARRAY_SIZE(ctx->fpr[x].val64); i++)		\
@@ -982,7 +981,7 @@ static inline void cop1_ctc(struct pt_regs *xcp, struct mips_fpu_struct *ctx,
  */
 
 static int cop1Emulate(struct pt_regs *xcp, struct mips_fpu_struct *ctx,
-		struct mm_decoded_insn dec_insn, void *__user *fault_addr)
+		struct mm_decoded_insn dec_insn, void __user **fault_addr)
 {
 	unsigned long contpc = xcp->cp0_epc + dec_insn.pc_inc;
 	unsigned int cond, cbit, bit0;
@@ -1151,7 +1150,7 @@ emul:
 
 		case mfhc_op:
 			if (!cpu_has_mips_r2_r6)
-				goto sigill;
+				return SIGILL;
 
 			/* copregister rd -> gpr[rt] */
 			if (MIPSInst_RT(ir) != 0) {
@@ -1162,7 +1161,7 @@ emul:
 
 		case mthc_op:
 			if (!cpu_has_mips_r2_r6)
-				goto sigill;
+				return SIGILL;
 
 			/* copregister rd <- gpr[rt] */
 			SITOHREG(xcp->regs[MIPSInst_RT(ir)], MIPSInst_RD(ir));
@@ -1199,8 +1198,7 @@ emul:
 			if (!cpu_has_mips_r6 || delay_slot(xcp))
 				return SIGILL;
 
-			likely = 0;
-			cond = 0;
+			cond = likely = 0;
 			fpr = &current->thread.fpu.fpr[MIPSInst_RT(ir)];
 			bit0 = get_fpr32(fpr, 0) & 0x1;
 			switch (MIPSInst_RS(ir)) {
@@ -1390,7 +1388,6 @@ branch_common:
 				xcp->regs[MIPSInst_RS(ir)];
 		break;
 	default:
-sigill:
 		return SIGILL;
 	}
 
@@ -1475,7 +1472,7 @@ DEF3OP(nmadd, dp, ieee754dp_mul, ieee754dp_add, ieee754dp_neg);
 DEF3OP(nmsub, dp, ieee754dp_mul, ieee754dp_sub, ieee754dp_neg);
 
 static int fpux_emu(struct pt_regs *xcp, struct mips_fpu_struct *ctx,
-	mips_instruction ir, void *__user *fault_addr)
+	mips_instruction ir, void __user **fault_addr)
 {
 	unsigned int rcsr = 0;	/* resulting csr */
 
@@ -2825,7 +2822,7 @@ dcopuop:
  * For simplicity we always terminate upon an ISA mode switch.
  */
 int fpu_emulator_cop1Handler(struct pt_regs *xcp, struct mips_fpu_struct *ctx,
-	int has_fpu, void *__user *fault_addr)
+	int has_fpu, void __user **fault_addr)
 {
 	unsigned long oldepc, prevepc;
 	struct mm_decoded_insn dec_insn;

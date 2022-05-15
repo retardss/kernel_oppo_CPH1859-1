@@ -123,6 +123,8 @@ EXPORT_SYMBOL_GPL(snd_hdac_device_init);
 void snd_hdac_device_exit(struct hdac_device *codec)
 {
 	pm_runtime_put_noidle(&codec->dev);
+	/* keep balance of runtime PM child_count in parent device */
+	pm_runtime_set_suspended(&codec->dev);
 	snd_hdac_bus_remove_device(codec->bus, codec);
 	kfree(codec->vendor_name);
 	kfree(codec->chip_name);
@@ -159,6 +161,7 @@ void snd_hdac_device_unregister(struct hdac_device *codec)
 	if (device_is_registered(&codec->dev)) {
 		hda_widget_sysfs_exit(codec);
 		device_del(&codec->dev);
+		snd_hdac_bus_remove_device(codec->bus, codec);
 	}
 }
 EXPORT_SYMBOL_GPL(snd_hdac_device_unregister);
@@ -299,13 +302,11 @@ EXPORT_SYMBOL_GPL(_snd_hdac_read_parm);
 int snd_hdac_read_parm_uncached(struct hdac_device *codec, hda_nid_t nid,
 				int parm)
 {
-	int val;
+	unsigned int cmd, val;
 
-	if (codec->regmap)
-		regcache_cache_bypass(codec->regmap, true);
-	val = snd_hdac_read_parm(codec, nid, parm);
-	if (codec->regmap)
-		regcache_cache_bypass(codec->regmap, false);
+	cmd = snd_hdac_regmap_encode_verb(nid, AC_VERB_PARAMETERS) | parm;
+	if (snd_hdac_regmap_read_raw_uncached(codec, cmd, &val) < 0)
+		return -1;
 	return val;
 }
 EXPORT_SYMBOL_GPL(snd_hdac_read_parm_uncached);
@@ -610,6 +611,22 @@ int snd_hdac_power_up_pm(struct hdac_device *codec)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(snd_hdac_power_up_pm);
+
+/* like snd_hdac_power_up_pm(), but only increment the pm count when
+ * already powered up.  Returns -1 if not powered up, 1 if incremented
+ * or 0 if unchanged.  Only used in hdac_regmap.c
+ */
+int snd_hdac_keep_power_up(struct hdac_device *codec)
+{
+	if (!atomic_inc_not_zero(&codec->in_pm)) {
+		int ret = pm_runtime_get_if_in_use(&codec->dev);
+		if (!ret)
+			return -1;
+		if (ret < 0)
+			return 0;
+	}
+	return 1;
+}
 
 /**
  * snd_hdac_power_down_pm - power down the codec

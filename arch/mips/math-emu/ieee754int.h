@@ -62,6 +62,9 @@ static inline int ieee754_class_nan(int xc)
 #define COMPZSP \
 	unsigned int zm; int ze; int zs; int zc
 
+#define COMPZSP \
+	unsigned zm; int ze; int zs; int zc
+
 #define EXPLODESP(v, vc, vs, ve, vm)					\
 {									\
 	vs = SPSIGN(v);							\

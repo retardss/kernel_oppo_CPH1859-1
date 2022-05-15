@@ -74,6 +74,9 @@ struct i2c_ram {
 	char    res1[4];	/* Reserved */
 	ushort  rpbase;		/* Relocation pointer */
 	char    res2[2];	/* Reserved */
+	/* The following elements are only for CPM2 */
+	char    res3[4];	/* Reserved */
+	uint    sdmatmp;	/* Internal */
 };
 
 #define I2COM_START	0x80
@@ -197,9 +200,7 @@ static void cpm_i2c_parse_message(struct i2c_adapter *adap,
 	tbdf = cpm->tbase + tx;
 	rbdf = cpm->rbase + rx;
 
-	addr = pmsg->addr << 1;
-	if (pmsg->flags & I2C_M_RD)
-		addr |= 1;
+	addr = i2c_8bit_addr_from_msg(pmsg);
 
 	tb = cpm->txbuf[tx];
 	rb = cpm->rxbuf[rx];
@@ -415,7 +416,7 @@ static const struct i2c_algorithm cpm_i2c_algo = {
 };
 
 /* CPM_MAX_READ is also limiting writes according to the code! */
-static struct i2c_adapter_quirks cpm_i2c_quirks = {
+static const struct i2c_adapter_quirks cpm_i2c_quirks = {
 	.max_num_msgs = CPM_MAXBD,
 	.max_read_len = CPM_MAX_READ,
 	.max_write_len = CPM_MAX_READ,
@@ -667,10 +668,8 @@ static int cpm_i2c_probe(struct platform_device *ofdev)
 	cpm->adap.nr = (data && len == 4) ? be32_to_cpup(data) : -1;
 	result = i2c_add_numbered_adapter(&cpm->adap);
 
-	if (result < 0) {
-		dev_err(&ofdev->dev, "Unable to register with I2C\n");
+	if (result < 0)
 		goto out_shut;
-	}
 
 	dev_dbg(&ofdev->dev, "hw routines for %s registered.\n",
 		cpm->adap.name);

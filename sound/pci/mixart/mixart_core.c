@@ -83,7 +83,6 @@ static int get_msg(struct mixart_mgr *mgr, struct mixart_msg *resp,
 	unsigned int i;
 #endif
 
-	mutex_lock(&mgr->msg_lock);
 	err = 0;
 
 	/* copy message descriptor from miXart to driver */
@@ -132,8 +131,6 @@ static int get_msg(struct mixart_mgr *mgr, struct mixart_msg *resp,
 	writel_be(headptr, MIXART_MEM(mgr, MSG_OUTBOUND_FREE_HEAD));
 
  _clean_exit:
-	mutex_unlock(&mgr->msg_lock);
-
 	return err;
 }
 
@@ -239,7 +236,7 @@ int snd_mixart_send_msg(struct mixart_mgr *mgr, struct mixart_msg *request, int 
 	struct mixart_msg resp;
 	u32 msg_frame = 0; /* set to 0, so it's no notification to wait for, but the answer */
 	int err;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 	long timeout;
 
 	init_waitqueue_entry(&wait, current);
@@ -271,7 +268,9 @@ int snd_mixart_send_msg(struct mixart_mgr *mgr, struct mixart_msg *request, int 
 	resp.data = resp_data;
 	resp.size = max_resp_size;
 
+	mutex_lock(&mgr->msg_lock);
 	err = get_msg(mgr, &resp, msg_frame);
+	mutex_unlock(&mgr->msg_lock);
 
 	if( request->message_id != resp.message_id )
 		dev_err(&mgr->pci->dev, "RESPONSE ERROR!\n");
@@ -284,7 +283,7 @@ int snd_mixart_send_msg_wait_notif(struct mixart_mgr *mgr,
 				   struct mixart_msg *request, u32 notif_event)
 {
 	int err;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 	long timeout;
 
 	if (snd_BUG_ON(!notif_event))

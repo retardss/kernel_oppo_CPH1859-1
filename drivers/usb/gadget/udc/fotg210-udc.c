@@ -527,7 +527,7 @@ static void fotg210_ep_fifo_flush(struct usb_ep *_ep)
 {
 }
 
-static struct usb_ep_ops fotg210_ep_ops = {
+static const struct usb_ep_ops fotg210_ep_ops = {
 	.enable		= fotg210_ep_enable,
 	.disable	= fotg210_ep_disable,
 
@@ -744,7 +744,7 @@ static void fotg210_get_status(struct fotg210_udc *fotg210,
 	fotg210->ep0_req->length = 2;
 
 	spin_unlock(&fotg210->lock);
-	fotg210_ep_queue(fotg210->gadget.ep0, fotg210->ep0_req, GFP_KERNEL);
+	fotg210_ep_queue(fotg210->gadget.ep0, fotg210->ep0_req, GFP_ATOMIC);
 	spin_lock(&fotg210->lock);
 }
 
@@ -1058,7 +1058,7 @@ static int fotg210_udc_stop(struct usb_gadget *g)
 	return 0;
 }
 
-static struct usb_gadget_ops fotg210_gadget_ops = {
+static const struct usb_gadget_ops fotg210_gadget_ops = {
 	.udc_start		= fotg210_udc_start,
 	.udc_stop		= fotg210_udc_stop,
 };

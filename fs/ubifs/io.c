@@ -237,7 +237,7 @@ int ubifs_is_mapped(const struct ubifs_info *c, int lnum)
 int ubifs_check_node(const struct ubifs_info *c, const void *buf, int lnum,
 		     int offs, int quiet, int must_chk_crc)
 {
-	int err = -EINVAL, type, node_len;
+	int err = -EINVAL, type, node_len, dump_node = 1;
 	uint32_t crc, node_crc, magic;
 	const struct ubifs_ch *ch = buf;
 
@@ -290,10 +290,22 @@ int ubifs_check_node(const struct ubifs_info *c, const void *buf, int lnum,
 out_len:
 	if (!quiet)
 		ubifs_err(c, "bad node length %d", node_len);
+	if (type == UBIFS_DATA_NODE && node_len > UBIFS_DATA_NODE_SZ)
+		dump_node = 0;
 out:
 	if (!quiet) {
 		ubifs_err(c, "bad node at LEB %d:%d", lnum, offs);
-		ubifs_dump_node(c, buf);
+		if (dump_node) {
+			ubifs_dump_node(c, buf);
+		} else {
+			int safe_len = min3(node_len, c->leb_size - offs,
+				(int)UBIFS_MAX_DATA_NODE_SZ);
+			pr_err("\tprevent out-of-bounds memory access\n");
+			pr_err("\ttruncated data node length      %d\n", safe_len);
+			pr_err("\tcorrupted data node:\n");
+			print_hex_dump(KERN_ERR, "\t", DUMP_PREFIX_OFFSET, 32, 1,
+					buf, safe_len, 0);
+		}
 		dump_stack();
 	}
 	return err;
@@ -452,16 +464,22 @@ static enum hrtimer_restart wbuf_timer_callback_nolock(struct hrtimer *timer)
  */
 static void new_wbuf_timer_nolock(struct ubifs_wbuf *wbuf)
 {
+	ktime_t softlimit = ms_to_ktime(dirty_writeback_interval * 10);
+	unsigned long long delta = dirty_writeback_interval;
+
+	/* centi to milli, milli to nano, then 10% */
+	delta *= 10ULL * NSEC_PER_MSEC / 10ULL;
+
 	ubifs_assert(!hrtimer_active(&wbuf->timer));
+	ubifs_assert(delta <= ULONG_MAX);
 
 	if (wbuf->no_timer)
 		return;
 	dbg_io("set timer for jhead %s, %llu-%llu millisecs",
 	       dbg_jhead(wbuf->jhead),
-	       div_u64(ktime_to_ns(wbuf->softlimit), USEC_PER_SEC),
-	       div_u64(ktime_to_ns(wbuf->softlimit) + wbuf->delta,
-		       USEC_PER_SEC));
-	hrtimer_start_range_ns(&wbuf->timer, wbuf->softlimit, wbuf->delta,
+	       div_u64(ktime_to_ns(softlimit), USEC_PER_SEC),
+	       div_u64(ktime_to_ns(softlimit) + delta, USEC_PER_SEC));
+	hrtimer_start_range_ns(&wbuf->timer, softlimit, delta,
 			       HRTIMER_MODE_REL);
 }
 
@@ -1059,10 +1077,6 @@ int ubifs_wbuf_init(struct ubifs_info *c, struct ubifs_wbuf *wbuf)
 
 	hrtimer_init(&wbuf->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	wbuf->timer.function = wbuf_timer_callback_nolock;
-	wbuf->softlimit = ktime_set(WBUF_TIMEOUT_SOFTLIMIT, 0);
-	wbuf->delta = WBUF_TIMEOUT_HARDLIMIT - WBUF_TIMEOUT_SOFTLIMIT;
-	wbuf->delta *= 1000000000ULL;
-	ubifs_assert(wbuf->delta <= ULONG_MAX);
 	return 0;
 }
 

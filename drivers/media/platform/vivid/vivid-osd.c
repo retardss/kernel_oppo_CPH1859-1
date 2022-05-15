@@ -167,7 +167,7 @@ static int _vivid_fb_check_var(struct fb_var_screeninfo *var, struct vivid_dev *
 	var->nonstd = 0;
 
 	var->vmode &= ~FB_VMODE_MASK;
-	var->vmode = FB_VMODE_NONINTERLACED;
+	var->vmode |= FB_VMODE_NONINTERLACED;
 
 	/* Dummy values */
 	var->hsync_len = 24;
@@ -360,7 +360,7 @@ void vivid_fb_release_buffers(struct vivid_dev *dev)
 
 	/* Release pseudo palette */
 	kfree(dev->fb_info.pseudo_palette);
-	kfree((void *)dev->video_vbase);
+	kfree(dev->video_vbase);
 }
 
 /* Initialize the specified card */

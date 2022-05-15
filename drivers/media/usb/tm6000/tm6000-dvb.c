@@ -11,10 +11,6 @@
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/kernel.h>
@@ -35,9 +31,7 @@ MODULE_DESCRIPTION("DVB driver extension module for tm5600/6000/6010 based TV ca
 MODULE_AUTHOR("Mauro Carvalho Chehab");
 MODULE_LICENSE("GPL");
 
-MODULE_SUPPORTED_DEVICE("{{Trident, tm5600},"
-			"{{Trident, tm6000},"
-			"{{Trident, tm6010}");
+MODULE_SUPPORTED_DEVICE("{{Trident, tm5600},{{Trident, tm6000},{{Trident, tm6010}");
 
 static int debug;
 
@@ -111,6 +105,7 @@ static void tm6000_urb_received(struct urb *urb)
 			printk(KERN_ERR "tm6000:  error %s\n", __func__);
 			kfree(urb->transfer_buffer);
 			usb_free_urb(urb);
+			dev->dvb->bulk_urb = NULL;
 		}
 	}
 }
@@ -129,10 +124,8 @@ static int tm6000_start_stream(struct tm6000_core *dev)
 	}
 
 	dvb->bulk_urb = usb_alloc_urb(0, GFP_KERNEL);
-	if (dvb->bulk_urb == NULL) {
-		printk(KERN_ERR "tm6000: couldn't allocate urb\n");
+	if (dvb->bulk_urb == NULL)
 		return -ENOMEM;
-	}
 
 	pipe = usb_rcvbulkpipe(dev->udev, dev->bulk_in.endp->desc.bEndpointAddress
 							  & USB_ENDPOINT_NUMBER_MASK);
@@ -143,6 +136,7 @@ static int tm6000_start_stream(struct tm6000_core *dev)
 	dvb->bulk_urb->transfer_buffer = kzalloc(size, GFP_KERNEL);
 	if (dvb->bulk_urb->transfer_buffer == NULL) {
 		usb_free_urb(dvb->bulk_urb);
+		dvb->bulk_urb = NULL;
 		printk(KERN_ERR "tm6000: couldn't allocate transfer buffer!\n");
 		return -ENOMEM;
 	}
@@ -170,6 +164,7 @@ static int tm6000_start_stream(struct tm6000_core *dev)
 
 		kfree(dvb->bulk_urb->transfer_buffer);
 		usb_free_urb(dvb->bulk_urb);
+		dvb->bulk_urb = NULL;
 		return ret;
 	}
 
@@ -299,13 +294,11 @@ static int register_dvb(struct tm6000_core *dev)
 			}
 
 			if (!dvb_attach(xc2028_attach, dvb->frontend, &cfg)) {
-				printk(KERN_ERR "tm6000: couldn't register "
-						"frontend (xc3028)\n");
+				printk(KERN_ERR "tm6000: couldn't register frontend (xc3028)\n");
 				ret = -EINVAL;
 				goto frontend_err;
 			}
-			printk(KERN_INFO "tm6000: XC2028/3028 asked to be "
-					 "attached to frontend!\n");
+			printk(KERN_INFO "tm6000: XC2028/3028 asked to be attached to frontend!\n");
 			break;
 			}
 		case TUNER_XC5000: {
@@ -322,13 +315,11 @@ static int register_dvb(struct tm6000_core *dev)
 			}
 
 			if (!dvb_attach(xc5000_attach, dvb->frontend, &dev->i2c_adap, &cfg)) {
-				printk(KERN_ERR "tm6000: couldn't register "
-						"frontend (xc5000)\n");
+				printk(KERN_ERR "tm6000: couldn't register frontend (xc5000)\n");
 				ret = -EINVAL;
 				goto frontend_err;
 			}
-			printk(KERN_INFO "tm6000: XC5000 asked to be "
-					 "attached to frontend!\n");
+			printk(KERN_INFO "tm6000: XC5000 asked to be attached to frontend!\n");
 			break;
 			}
 		}

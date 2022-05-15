@@ -113,11 +113,12 @@ void machine_kexec(struct kimage *image)
 
 void __init reserve_crashkernel(void)
 {
-	unsigned long long crash_size, crash_base;
+	unsigned long long crash_size, crash_base, total_mem_sz;
 	int ret;
 
+	total_mem_sz = memory_limit ? memory_limit : memblock_phys_mem_size();
 	/* use common parsing */
-	ret = parse_crashkernel(boot_command_line, memblock_phys_mem_size(),
+	ret = parse_crashkernel(boot_command_line, total_mem_sz,
 			&crash_size, &crash_base);
 	if (ret == 0 && crash_size > 0) {
 		crashk_res.start = crash_base;
@@ -176,6 +177,7 @@ void __init reserve_crashkernel(void)
 	/* Crash kernel trumps memory limit */
 	if (memory_limit && memory_limit <= crashk_res.end) {
 		memory_limit = crashk_res.end + 1;
+		total_mem_sz = memory_limit;
 		printk("Adjusted memory limit for crashkernel, now 0x%llx\n",
 		       memory_limit);
 	}
@@ -184,7 +186,7 @@ void __init reserve_crashkernel(void)
 			"for crashkernel (System RAM: %ldMB)\n",
 			(unsigned long)(crash_size >> 20),
 			(unsigned long)(crashk_res.start >> 20),
-			(unsigned long)(memblock_phys_mem_size() >> 20));
+			(unsigned long)(total_mem_sz >> 20));
 
 	if (!memblock_is_region_memory(crashk_res.start, crash_size) ||
 	    memblock_reserve(crashk_res.start, crash_size)) {
@@ -233,17 +235,12 @@ static struct property memory_limit_prop = {
 
 static void __init export_crashk_values(struct device_node *node)
 {
-	struct property *prop;
-
 	/* There might be existing crash kernel properties, but we can't
 	 * be sure what's in them, so remove them. */
-	prop = of_find_property(node, "linux,crashkernel-base", NULL);
-	if (prop)
-		of_remove_property(node, prop);
-
-	prop = of_find_property(node, "linux,crashkernel-size", NULL);
-	if (prop)
-		of_remove_property(node, prop);
+	of_remove_property(node, of_find_property(node,
+				"linux,crashkernel-base", NULL));
+	of_remove_property(node, of_find_property(node,
+				"linux,crashkernel-size", NULL));
 
 	if (crashk_res.start != 0) {
 		crashk_base = cpu_to_be_ulong(crashk_res.start),
@@ -263,16 +260,13 @@ static void __init export_crashk_values(struct device_node *node)
 static int __init kexec_setup(void)
 {
 	struct device_node *node;
-	struct property *prop;
 
 	node = of_find_node_by_path("/chosen");
 	if (!node)
 		return -ENOENT;
 
 	/* remove any stale properties so ours can be found */
-	prop = of_find_property(node, kernel_end_prop.name, NULL);
-	if (prop)
-		of_remove_property(node, prop);
+	of_remove_property(node, of_find_property(node, kernel_end_prop.name, NULL));
 
 	/* information needed by userspace when using default_machine_kexec */
 	kernel_end = cpu_to_be_ulong(__pa(_end));

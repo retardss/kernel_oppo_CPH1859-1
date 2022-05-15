@@ -214,6 +214,21 @@ static void recover_inode(struct inode *inode, struct page *page)
 	char *name;
 
 	inode->i_mode = le16_to_cpu(raw->i_mode);
+	i_uid_write(inode, le32_to_cpu(raw->i_uid));
+	i_gid_write(inode, le32_to_cpu(raw->i_gid));
+
+	if (raw->i_inline & F2FS_EXTRA_ATTR) {
+		if (f2fs_sb_has_project_quota(F2FS_I_SB(inode)->sb) &&
+			F2FS_FITS_IN_INODE(raw, le16_to_cpu(raw->i_extra_isize),
+								i_projid)) {
+			projid_t i_projid;
+
+			i_projid = (projid_t)le32_to_cpu(raw->i_projid);
+			F2FS_I(inode)->i_projid =
+				make_kprojid(&init_user_ns, i_projid);
+		}
+	}
+
 	f2fs_i_size_write(inode, le64_to_cpu(raw->i_size));
 	inode->i_atime.tv_sec = le64_to_cpu(raw->i_atime);
 	inode->i_ctime.tv_sec = le64_to_cpu(raw->i_ctime);
@@ -223,8 +238,11 @@ static void recover_inode(struct inode *inode, struct page *page)
 	inode->i_mtime.tv_nsec = le32_to_cpu(raw->i_mtime_nsec);
 
 	F2FS_I(inode)->i_advise = raw->i_advise;
+	F2FS_I(inode)->i_flags = le32_to_cpu(raw->i_flags);
 
 	recover_inline_flags(inode, raw);
+
+	f2fs_mark_inode_dirty_sync(inode, true);
 
 	if (file_enc_name(inode))
 		name = "<encrypted>";
@@ -254,10 +272,14 @@ static int find_fsync_dnodes(struct f2fs_sb_info *sbi, struct list_head *head,
 	while (1) {
 		struct fsync_inode_entry *entry;
 
-		if (!is_valid_blkaddr(sbi, blkaddr, META_POR))
+		if (!f2fs_is_valid_blkaddr(sbi, blkaddr, META_POR))
 			return 0;
 
 		page = get_tmp_page(sbi, blkaddr);
+		if (IS_ERR(page)) {
+			err = PTR_ERR(page);
+			break;
+		}
 
 		if (!is_recoverable_dnode(page))
 			break;
@@ -356,6 +378,8 @@ static int check_index_in_prev_nodes(struct f2fs_sb_info *sbi,
 	}
 
 	sum_page = get_sum_page(sbi, segno);
+	if (IS_ERR(sum_page))
+		return PTR_ERR(sum_page);
 	sum_node = (struct f2fs_summary_block *)page_address(sum_page);
 	sum = sum_node->entries[blkoff];
 	f2fs_put_page(sum_page, 1);
@@ -472,9 +496,20 @@ retry_dn:
 
 	f2fs_wait_on_page_writeback(dn.node_page, NODE, true);
 
-	get_node_info(sbi, dn.nid, &ni);
+	err = get_node_info(sbi, dn.nid, &ni);
+	if (err)
+		goto err;
+
 	f2fs_bug_on(sbi, ni.ino != ino_of_node(page));
-	f2fs_bug_on(sbi, ofs_of_node(dn.node_page) != ofs_of_node(page));
+
+	if (ofs_of_node(dn.node_page) != ofs_of_node(page)) {
+		f2fs_msg(sbi->sb, KERN_WARNING,
+			"Inconsistent ofs_of_node, ino:%lu, ofs:%u, %u",
+			inode->i_ino, ofs_of_node(dn.node_page),
+			ofs_of_node(page));
+		err = -EFSCORRUPTED;
+		goto err;
+	}
 
 	for (; start < end; start++, dn.ofs_in_node++) {
 		block_t src, dest;
@@ -508,7 +543,7 @@ retry_dn:
 		}
 
 		/* dest is valid block, try to recover from src to dest */
-		if (is_valid_blkaddr(sbi, dest, META_POR)) {
+		if (f2fs_is_valid_blkaddr(sbi, dest, META_POR)) {
 
 			if (src == NULL_ADDR) {
 				err = reserve_new_block(&dn);
@@ -569,12 +604,16 @@ static int recover_data(struct f2fs_sb_info *sbi, struct list_head *inode_list,
 	while (1) {
 		struct fsync_inode_entry *entry;
 
-		if (!is_valid_blkaddr(sbi, blkaddr, META_POR))
+		if (!f2fs_is_valid_blkaddr(sbi, blkaddr, META_POR))
 			break;
 
 		ra_meta_pages_cond(sbi, blkaddr);
 
 		page = get_tmp_page(sbi, blkaddr);
+		if (IS_ERR(page)) {
+			err = PTR_ERR(page);
+			break;
+		}
 
 		if (!is_recoverable_dnode(page)) {
 			f2fs_put_page(page, 1);

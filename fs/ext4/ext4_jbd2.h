@@ -77,7 +77,14 @@
 
 #define EXT4_RESERVE_TRANS_BLOCKS	12U
 
-#define EXT4_INDEX_EXTRA_TRANS_BLOCKS	8
+/*
+ * Number of credits needed if we need to insert an entry into a
+ * directory.  For each new index block, we need 4 blocks (old index
+ * block, new index block, bitmap block, bg summary).  For normal
+ * htree directories there are 2 levels; if the largedir feature
+ * enabled it's 3 levels.
+ */
+#define EXT4_INDEX_EXTRA_TRANS_BLOCKS	12U
 
 #ifdef CONFIG_QUOTA
 /* Amount of blocks needed for quota update - we know that the structure was
@@ -103,20 +110,6 @@
 #define EXT4_MAXQUOTAS_TRANS_BLOCKS(sb) (EXT4_MAXQUOTAS*EXT4_QUOTA_TRANS_BLOCKS(sb))
 #define EXT4_MAXQUOTAS_INIT_BLOCKS(sb) (EXT4_MAXQUOTAS*EXT4_QUOTA_INIT_BLOCKS(sb))
 #define EXT4_MAXQUOTAS_DEL_BLOCKS(sb) (EXT4_MAXQUOTAS*EXT4_QUOTA_DEL_BLOCKS(sb))
-
-static inline int ext4_jbd2_credits_xattr(struct inode *inode)
-{
-	int credits = EXT4_DATA_TRANS_BLOCKS(inode->i_sb);
-
-	/*
-	 * In case of inline data, we may push out the data to a block,
-	 * so we need to reserve credits for this eventuality
-	 */
-	if (ext4_has_inline_data(inode))
-		credits += ext4_writepage_trans_blocks(inode) + 1;
-	return credits;
-}
-
 
 /*
  * Ext4 handle operation types -- for logging purposes
@@ -175,6 +168,13 @@ struct ext4_journal_cb_entry {
  * There is no guaranteed calling order of multiple registered callbacks on
  * the same transaction.
  */
+static inline void _ext4_journal_callback_add(handle_t *handle,
+			struct ext4_journal_cb_entry *jce)
+{
+	/* Add the jce to transaction's private list */
+	list_add_tail(&jce->jce_list, &handle->h_transaction->t_private_list);
+}
+
 static inline void ext4_journal_callback_add(handle_t *handle,
 			void (*func)(struct super_block *sb,
 				     struct ext4_journal_cb_entry *jce,
@@ -187,9 +187,10 @@ static inline void ext4_journal_callback_add(handle_t *handle,
 	/* Add the jce to transaction's private list */
 	jce->jce_func = func;
 	spin_lock(&sbi->s_md_lock);
-	list_add_tail(&jce->jce_list, &handle->h_transaction->t_private_list);
+	_ext4_journal_callback_add(handle, jce);
 	spin_unlock(&sbi->s_md_lock);
 }
+
 
 /**
  * ext4_journal_callback_del: delete a registered callback
@@ -226,6 +227,9 @@ int ext4_reserve_inode_write(handle_t *handle, struct inode *inode,
 
 int ext4_mark_inode_dirty(handle_t *handle, struct inode *inode);
 
+int ext4_expand_extra_isize(struct inode *inode,
+			    unsigned int new_extra_isize,
+			    struct ext4_iloc *iloc);
 /*
  * Wrapper functions with which ext4 calls into JBD.
  */
@@ -359,10 +363,21 @@ static inline int ext4_journal_force_commit(journal_t *journal)
 	return 0;
 }
 
-static inline int ext4_jbd2_file_inode(handle_t *handle, struct inode *inode)
+static inline int ext4_jbd2_inode_add_write(handle_t *handle,
+		struct inode *inode, loff_t start_byte, loff_t length)
 {
 	if (ext4_handle_valid(handle))
-		return jbd2_journal_file_inode(handle, EXT4_I(inode)->jinode);
+		return jbd2_journal_inode_ranged_write(handle,
+				EXT4_I(inode)->jinode, start_byte, length);
+	return 0;
+}
+
+static inline int ext4_jbd2_inode_add_wait(handle_t *handle,
+		struct inode *inode, loff_t start_byte, loff_t length)
+{
+	if (ext4_handle_valid(handle))
+		return jbd2_journal_inode_ranged_wait(handle,
+				EXT4_I(inode)->jinode, start_byte, length);
 	return 0;
 }
 
@@ -372,7 +387,7 @@ static inline void ext4_update_inode_fsync_trans(handle_t *handle,
 {
 	struct ext4_inode_info *ei = EXT4_I(inode);
 
-	if (ext4_handle_valid(handle)) {
+	if (ext4_handle_valid(handle) && !is_handle_aborted(handle)) {
 		ei->i_sync_tid = handle->h_transaction->t_tid;
 		if (datasync)
 			ei->i_datasync_tid = handle->h_transaction->t_tid;

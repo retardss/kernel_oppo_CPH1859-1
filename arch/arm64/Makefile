@@ -11,13 +11,33 @@
 # Copyright (C) 1995-2001 by Russell King
 subdir-ccflags-y += -Werror
 
-LDFLAGS_vmlinux	:=--no-undefined -X
+LDFLAGS_vmlinux	:=--no-undefined -X -z norelro
 CPPFLAGS_vmlinux.lds = -DTEXT_OFFSET=$(TEXT_OFFSET)
-OBJCOPYFLAGS	:=-O binary -R .note -R .note.gnu.build-id -R .comment -S
 GZFLAGS		:=-9
 
-ifneq ($(CONFIG_RELOCATABLE),)
-LDFLAGS_vmlinux		+= -pie -Bsymbolic
+ifeq ($(CONFIG_RELOCATABLE), y)
+# Pass --no-apply-dynamic-relocs to restore pre-binutils-2.27 behaviour
+# for relative relocs, since this leads to better Image compression
+# with the relocation offsets always being zero.
+LDFLAGS_vmlinux		+= -shared -Bsymbolic -z notext \
+			$(call ld-option, --no-apply-dynamic-relocs)
+endif
+
+ifeq ($(CONFIG_ARM64_ERRATUM_843419),y)
+  ifeq ($(call ld-option, --fix-cortex-a53-843419),)
+$(warning ld does not support --fix-cortex-a53-843419; kernel may be susceptible to erratum)
+  else
+    ifeq ($(call gold-ifversion, -lt, 114000000, y), y)
+$(warning This version of GNU gold may generate incorrect code with --fix-cortex-a53-843419;\
+	see https://sourceware.org/bugzilla/show_bug.cgi?id=21491)
+    endif
+LDFLAGS_vmlinux	+= --fix-cortex-a53-843419
+  endif
+else
+  ifeq ($(ld-name),gold)
+# Pass --no-fix-cortex-a53-843419 to ensure the erratum fix is disabled
+LDFLAGS	+= --no-fix-cortex-a53-843419
+  endif
 endif
 
 KBUILD_DEFCONFIG := defconfig
@@ -31,6 +51,14 @@ $(warning LSE atomics not supported by binutils)
   endif
 endif
 
+ifeq ($(CONFIG_ARM64), y)
+brokengasinst := $(call as-instr,1:\n.inst 0\n.rept . - 1b\n\nnop\n.endr\n,,-DCONFIG_BROKEN_GAS_INST=1)
+
+  ifneq ($(brokengasinst),)
+$(warning Detected assembler with broken .inst; disassembly will be unreliable)
+  endif
+endif
+
 ifeq ($(cc-name),clang)
 # This is a workaround for https://bugs.llvm.org/show_bug.cgi?id=30792.
 # TODO: revert when this is fixed in LLVM.
@@ -38,26 +66,51 @@ KBUILD_CFLAGS	+= -mno-implicit-float
 else
 KBUILD_CFLAGS	+= -mgeneral-regs-only
 endif
-KBUILD_CFLAGS	+= $(lseinstr)
-KBUILD_CFLAGS	+= -fno-pic
+KBUILD_CFLAGS	+= $(lseinstr) $(brokengasinst)
 KBUILD_CFLAGS	+= -fno-asynchronous-unwind-tables
 KBUILD_CFLAGS	+= $(call cc-option, -mpc-relative-literal-loads)
-KBUILD_AFLAGS	+= $(lseinstr)
+KBUILD_CFLAGS	+= -fno-pic
+KBUILD_AFLAGS	+= $(lseinstr) $(brokengasinst)
+
+KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
+KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
 
 ifeq ($(CONFIG_CPU_BIG_ENDIAN), y)
 KBUILD_CPPFLAGS	+= -mbig-endian
+CHECKFLAGS	+= -D__AARCH64EB__
 AS		+= -EB
 LD		+= -EB
+ifeq ($(ld-name),gold)
+LDFLAGS		+= -maarch64_elf64_be_vec
+else
+LDFLAGS		+= -maarch64linuxb
+endif
+UTS_MACHINE	:= aarch64_be
 else
 KBUILD_CPPFLAGS	+= -mlittle-endian
+CHECKFLAGS	+= -D__AARCH64EL__
 AS		+= -EL
 LD		+= -EL
+ifeq ($(ld-name),gold)
+LDFLAGS		+= -maarch64_elf64_le_vec
+else
+LDFLAGS		+= -maarch64linux
+endif
+UTS_MACHINE	:= aarch64
 endif
 
-CHECKFLAGS	+= -D__aarch64__
+CHECKFLAGS	+= -D__aarch64__ -m64
 
 ifeq ($(CONFIG_ARM64_MODULE_CMODEL_LARGE), y)
 KBUILD_CFLAGS_MODULE	+= -mcmodel=large
+ifeq ($(CONFIG_LTO_CLANG), y)
+# Code model is not stored in LLVM IR, so we need to pass it also to LLVMgold
+LDFLAGS		+= -plugin-opt=-code-model=large
+endif
+endif
+
+ifeq ($(CONFIG_ARM64_MODULE_PLTS),y)
+KBUILD_LDFLAGS_MODULE	+= -T $(srctree)/arch/arm64/kernel/module.lds
 endif
 
 ifeq ($(CONFIG_ARM64_MODULE_PLTS),y)
@@ -69,7 +122,9 @@ head-y		:= arch/arm64/kernel/head.o
 
 # The byte offset of the kernel image in RAM from the start of RAM.
 ifeq ($(CONFIG_ARM64_RANDOMIZE_TEXT_OFFSET), y)
-TEXT_OFFSET := $(shell awk 'BEGIN {srand(); printf "0x%03x000\n", int(512 * rand())}')
+TEXT_OFFSET := $(shell awk "BEGIN {srand(); printf \"0x%06x\n\", \
+		 int(2 * 1024 * 1024 / (2 ^ $(CONFIG_ARM64_PAGE_SHIFT)) * \
+		 rand()) * (2 ^ $(CONFIG_ARM64_PAGE_SHIFT))}")
 else
 TEXT_OFFSET := 0x00080000
 endif
@@ -95,31 +150,34 @@ core-$(CONFIG_CRYPTO) += arch/arm64/crypto/
 libs-y		:= arch/arm64/lib/ $(libs-y)
 core-$(CONFIG_EFI_STUB) += $(objtree)/drivers/firmware/efi/libstub/lib.a
 
-# Default target when executing plain make
-ifeq ($(CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE),y)
-KBUILD_IMAGE	:= $(subst $\",,$(CONFIG_BUILD_ARM64_APPENDED_KERNEL_IMAGE_NAME))
+ifeq ($(CONFIG_BUILD_ARM64_KERNEL_COMPRESSION_GZIP),y)
+KBUILD_IMAGE   := Image.gz
 else
-KBUILD_IMAGE	:= Image.gz
+KBUILD_IMAGE   := Image
+endif
+
+# Default target when executing plain make
+boot		:= arch/arm64/boot
+ifeq ($(CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE),y)
+KBUILD_TARGET  := $(addsuffix -dtb,$(KBUILD_IMAGE))
+KBUILD_IMAGE	:= $(boot)/$(addsuffix -dtb,$(KBUILD_IMAGE))
 endif
 
 KBUILD_DTBS	:= dtbs
 
-all:	$(KBUILD_IMAGE) $(KBUILD_DTBS)
+ifeq ($(CONFIG_BUILD_ARM64_DT_OVERLAY),y)
+export DTC_FLAGS := -@
+endif
 
-MTK_PLATFORM := $(CONFIG_MTK_PLATFORM:"%"=%)
-MTK_PROJECT := $(CONFIG_ARCH_MTK_PROJECT:"%"=%)
-export MTK_PLATFORM MTK_PROJECT MTK_TARGET_PROJECT
--include $(srctree)/scripts/drvgen/drvgen.mk
-
-boot := arch/arm64/boot
+all:	$(KBUILD_DTBS) $(KBUILD_TARGET)
 
 Image: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
-Image.%: vmlinux
+Image.%: Image
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
-zinstall install: vmlinux
+zinstall install:
 	$(Q)$(MAKE) $(build)=$(boot) $@
 
 %.dtb: scripts $(DRVGEN_FILE_LIST)
@@ -133,7 +191,10 @@ dtbs: prepare scripts dtbo_check
 dtbs_install:
 	$(Q)$(MAKE) $(dtbinst)=$(boot)/dts
 
-Image-dtb Image.gz-dtb: vmlinux scripts dtbs
+Image-dtb: vmlinux scripts dtbs
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+
+Image.gz-dtb: vmlinux scripts dtbs Image.gz
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 PHONY += vdso_install
@@ -145,6 +206,7 @@ archclean:
 	$(Q)$(MAKE) $(clean)=$(boot)
 	$(Q)$(MAKE) $(clean)=$(boot)/dts
 
+ifeq ($(KBUILD_EXTMOD),)
 # We need to generate vdso-offsets.h before compiling certain files in kernel/.
 # In order to do that, we should use the archprepare target, but we can't since
 # asm-offsets.h is included in some files used to generate vdso-offsets.h, and
@@ -154,6 +216,7 @@ archclean:
 prepare: vdso_prepare
 vdso_prepare: prepare0
 	$(Q)$(MAKE) $(build)=arch/arm64/kernel/vdso include/generated/vdso-offsets.h
+endif
 
 define archhelp
   echo  '* Image.gz      - Compressed kernel image (arch/$(ARCH)/boot/Image.gz)'

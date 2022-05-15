@@ -60,7 +60,7 @@ _GLOBAL(__tlbil_va)
 	isync
 1:	blr
 
-#elif defined(CONFIG_8xx)
+#elif defined(CONFIG_PPC_8xx)
 
 /*
  * Nothing to do for 8xx, everything is inline
@@ -108,7 +108,7 @@ END_MMU_FTR_SECTION_IFSET(MMU_FTR_TYPE_47x)
 	blr
 2:
 #ifdef CONFIG_PPC_47x
-	oris	r7,r6,0x8000	/* specify way explicitely */
+	oris	r7,r6,0x8000	/* specify way explicitly */
 	clrrwi	r4,r3,12	/* get an EPN for the hashing with V = 0 */
 	ori	r4,r4,PPC47x_TLBE_SIZE
 	tlbwe   r4,r7,0		/* write it */
@@ -149,7 +149,7 @@ END_MMU_FTR_SECTION_IFSET(MMU_FTR_TYPE_47x)
 	li	r3,-1		/* Current set */
 	lis	r10,tlb_47x_boltmap@h
 	ori	r10,r10,tlb_47x_boltmap@l
-	lis	r7,0x8000	/* Specify way explicitely */
+	lis	r7,0x8000	/* Specify way explicitly */
 
 	b	9f		/* For each set */
 
@@ -400,7 +400,7 @@ _GLOBAL(set_context)
  * extern void loadcam_entry(unsigned int index)
  *
  * Load TLBCAM[index] entry in to the L2 CAM MMU
- * Must preserve r7, r8, r9, and r10
+ * Must preserve r7, r8, r9, r10 and r11
  */
 _GLOBAL(loadcam_entry)
 	mflr	r5
@@ -436,6 +436,10 @@ END_MMU_FTR_SECTION_IFSET(MMU_FTR_BIG_PHYS)
  */
 _GLOBAL(loadcam_multi)
 	mflr	r8
+	/* Don't switch to AS=1 if already there */
+	mfmsr	r11
+	andi.	r11,r11,MSR_IS
+	bne	10f
 
 	/*
 	 * Set up temporary TLB entry that is the same as what we're
@@ -461,6 +465,7 @@ _GLOBAL(loadcam_multi)
 	mtmsr	r6
 	isync
 
+10:
 	mr	r9,r3
 	add	r10,r3,r4
 2:	bl	loadcam_entry
@@ -468,6 +473,10 @@ _GLOBAL(loadcam_multi)
 	cmpw	r9,r10
 	mr	r3,r9
 	blt	2b
+
+	/* Don't return to AS=0 if we were in AS=1 at function start */
+	andi.	r11,r11,MSR_IS
+	bne	3f
 
 	/* Return to AS=0 and clear the temporary entry */
 	mfmsr	r6
@@ -484,6 +493,7 @@ _GLOBAL(loadcam_multi)
 	tlbwe
 	isync
 
+3:
 	mtlr	r8
 	blr
 #endif

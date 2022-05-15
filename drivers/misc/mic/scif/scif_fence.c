@@ -27,7 +27,8 @@
 void scif_recv_mark(struct scif_dev *scifdev, struct scifmsg *msg)
 {
 	struct scif_endpt *ep = (struct scif_endpt *)msg->payload[0];
-	int mark, err;
+	int mark = 0;
+	int err;
 
 	err = _scif_fence_mark(ep, &mark);
 	if (err)
@@ -271,7 +272,7 @@ static int _scif_prog_signal(scif_epd_t epd, dma_addr_t dst, u64 val)
 dma_fail:
 	if (!x100)
 		dma_pool_free(ep->remote_dev->signal_pool, status,
-			      status->src_dma_addr);
+			      src - offsetof(struct scif_status, val));
 alloc_fail:
 	return err;
 }

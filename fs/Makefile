@@ -1,16 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for the Linux filesystems.
 #
 # 14 Sep 2000, Christoph Hellwig <hch@infradead.org>
 # Rewritten to use lists instead of if-statements.
-# 
-subdir-ccflags-y += -Werror
-#ifdef VENDOR_EDIT
-#for enable KASAN, use GCC complile tool, add flag -Wno-misleading-indentation
-ifeq ($(CONFIG_KASAN),y)
-subdir-ccflags-y += -Wno-misleading-indentation
-endif
-#endif /*VENDOR_EDIT*/
+#
 
 obj-y :=	open.o read_write.o file_table.o super.o \
 		char_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
@@ -56,6 +50,7 @@ obj-$(CONFIG_COREDUMP)		+= coredump.o
 obj-$(CONFIG_SYSCTL)		+= drop_caches.o
 
 obj-$(CONFIG_FHANDLE)		+= fhandle.o
+obj-$(CONFIG_FS_IOMAP)		+= iomap.o
 
 obj-y				+= quota/
 
@@ -104,7 +99,6 @@ obj-$(CONFIG_NTFS_FS)		+= ntfs/
 obj-$(CONFIG_UFS_FS)		+= ufs/
 obj-$(CONFIG_EFS_FS)		+= efs/
 obj-$(CONFIG_JFFS2_FS)		+= jffs2/
-obj-$(CONFIG_LOGFS)		+= logfs/
 obj-$(CONFIG_UBIFS_FS)		+= ubifs/
 obj-$(CONFIG_AFFS_FS)		+= affs/
 obj-$(CONFIG_ROMFS_FS)		+= romfs/
@@ -114,6 +108,7 @@ obj-$(CONFIG_AUTOFS4_FS)	+= autofs4/
 obj-$(CONFIG_ADFS_FS)		+= adfs/
 obj-$(CONFIG_FUSE_FS)		+= fuse/
 obj-$(CONFIG_OVERLAY_FS)	+= overlayfs/
+obj-$(CONFIG_ORANGEFS_FS)       += orangefs/
 obj-$(CONFIG_UDF_FS)		+= udf/
 obj-$(CONFIG_SUN_OPENPROMFS)	+= openpromfs/
 obj-$(CONFIG_OMFS_FS)		+= omfs/

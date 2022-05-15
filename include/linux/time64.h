@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_TIME64_H
 #define _LINUX_TIME64_H
 
@@ -5,6 +6,7 @@
 #include <linux/math64.h>
 
 typedef __s64 time64_t;
+typedef __u64 timeu64_t;
 
 /*
  * This wants to go into uapi/linux/time.h once we agreed about the
@@ -65,7 +67,6 @@ static inline struct itimerspec64 itimerspec_to_itimerspec64(struct itimerspec *
 # define timespec64_equal		timespec_equal
 # define timespec64_compare		timespec_compare
 # define set_normalized_timespec64	set_normalized_timespec
-# define timespec64_add_safe		timespec_add_safe
 # define timespec64_add			timespec_add
 # define timespec64_sub			timespec_sub
 # define timespec64_valid		timespec_valid
@@ -134,15 +135,6 @@ static inline int timespec64_compare(const struct timespec64 *lhs, const struct 
 
 extern void set_normalized_timespec64(struct timespec64 *ts, time64_t sec, s64 nsec);
 
-/*
- * timespec64_add_safe assumes both values are positive and checks for
- * overflow. It will return TIME_T_MAX if the returned value would be
- * smaller then either of the arguments.
- */
-extern struct timespec64 timespec64_add_safe(const struct timespec64 lhs,
-					 const struct timespec64 rhs);
-
-
 static inline struct timespec64 timespec64_add(struct timespec64 lhs,
 						struct timespec64 rhs)
 {
@@ -197,6 +189,10 @@ static inline bool timespec64_valid_strict(const struct timespec64 *ts)
  */
 static inline s64 timespec64_to_ns(const struct timespec64 *ts)
 {
+	/* Prevent multiplication overflow */
+	if ((unsigned long long)ts->tv_sec >= KTIME_SEC_MAX)
+		return KTIME_MAX;
+
 	return ((s64) ts->tv_sec * NSEC_PER_SEC) + ts->tv_nsec;
 }
 
@@ -223,5 +219,12 @@ static __always_inline void timespec64_add_ns(struct timespec64 *a, u64 ns)
 }
 
 #endif
+
+/*
+ * timespec64_add_safe assumes both values are positive and checks for
+ * overflow. It will return TIME64_MAX in case of overflow.
+ */
+extern struct timespec64 timespec64_add_safe(const struct timespec64 lhs,
+					 const struct timespec64 rhs);
 
 #endif /* _LINUX_TIME64_H */

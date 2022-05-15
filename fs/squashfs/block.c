@@ -33,6 +33,7 @@
 #include <linux/string.h>
 #include <linux/pagemap.h>
 #include <linux/buffer_head.h>
+#include <linux/bio.h>
 #include <linux/workqueue.h>
 
 #include "squashfs_fs.h"
@@ -190,7 +191,7 @@ static void read_wq_handler(struct work_struct *work)
 static void squashfs_bio_end_io(struct bio *bio)
 {
 	int i;
-	int error = bio->bi_error;
+	blk_status_t error = bio->bi_status;
 	struct squashfs_bio_request *bio_req = bio->bi_private;
 
 	bio_put(bio);
@@ -300,7 +301,7 @@ static int squashfs_bio_submit(struct squashfs_read_request *req)
 
 		/* Otherwise, submit the current BIO and create a new one */
 		if (bio)
-			submit_bio(READ, bio);
+			submit_bio(bio);
 		bio_req = kcalloc(1, sizeof(struct squashfs_bio_request),
 				  GFP_NOIO);
 		if (!bio_req)
@@ -309,9 +310,10 @@ static int squashfs_bio_submit(struct squashfs_read_request *req)
 		bio = bio_alloc(GFP_NOIO, bio_max_pages);
 		if (!bio)
 			goto bio_alloc_failed;
-		bio->bi_bdev = req->sb->s_bdev;
+		bio_set_dev(bio, req->sb->s_bdev);
 		bio->bi_iter.bi_sector = (block + b)
 				       << (msblk->devblksize_log2 - 9);
+		bio_set_op_attrs(bio, REQ_OP_READ, 0);
 		bio->bi_private = bio_req;
 		bio->bi_end_io = squashfs_bio_end_io;
 
@@ -320,7 +322,7 @@ static int squashfs_bio_submit(struct squashfs_read_request *req)
 		prev_block = b;
 	}
 	if (bio)
-		submit_bio(READ, bio);
+		submit_bio(bio);
 
 	if (req->synchronous)
 		squashfs_process_blocks(req);

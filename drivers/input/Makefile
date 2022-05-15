@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for the input core drivers.
 #
@@ -30,8 +31,4 @@ obj-$(CONFIG_INPUT_APMPOWER)	+= apm-power.o
 obj-$(CONFIG_INPUT_KEYRESET)	+= keyreset.o
 obj-$(CONFIG_INPUT_KEYCOMBO)	+= keycombo.o
 
-#ifdef VENDOR_EDIT
-#Long.Liu@BSP.Fingerprint.Basic,2018/9/25,Add for oppo secure common
-obj-y          += misc/oppo_seccommon_drivers/
-#endif //VENDOR_EDIT
-
+obj-$(CONFIG_RMI4_CORE)		+= rmi4/

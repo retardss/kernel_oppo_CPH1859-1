@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 menu "Device Drivers"
 
 source "drivers/amba/Kconfig"
@@ -57,6 +58,8 @@ source "drivers/i2c/Kconfig"
 source "drivers/spi/Kconfig"
 
 source "drivers/spmi/Kconfig"
+
+source "drivers/slimbus/Kconfig"
 
 source "drivers/hsi/Kconfig"
 
@@ -118,6 +121,8 @@ source "drivers/rtc/Kconfig"
 
 source "drivers/dma/Kconfig"
 
+source "drivers/dma-buf/Kconfig"
+
 source "drivers/dca/Kconfig"
 
 source "drivers/auxdisplay/Kconfig"
@@ -135,6 +140,8 @@ source "drivers/virtio/Kconfig"
 source "drivers/hv/Kconfig"
 
 source "drivers/xen/Kconfig"
+
+source "drivers/vservices/Kconfig"
 
 source "drivers/staging/Kconfig"
 
@@ -170,6 +177,8 @@ source "drivers/vme/Kconfig"
 
 source "drivers/pwm/Kconfig"
 
+source "drivers/gpu/msm/Kconfig"
+
 source "drivers/irqchip/Kconfig"
 
 source "drivers/ipack/Kconfig"
@@ -194,6 +203,8 @@ source "drivers/android/Kconfig"
 
 source "drivers/nvdimm/Kconfig"
 
+source "drivers/dax/Kconfig"
+
 source "drivers/nvmem/Kconfig"
 
 source "drivers/hwtracing/stm/Kconfig"
@@ -202,10 +213,14 @@ source "drivers/hwtracing/intel_th/Kconfig"
 
 source "drivers/fpga/Kconfig"
 
+source "drivers/fsi/Kconfig"
+
 source "drivers/tee/Kconfig"
 
-#ifdef VENDOR_EDIT /*ChenYong@Plf.Framework, 2018/11/27, add for kernel hotfix*/
-source "drivers/qihoo/Kconfig"
-#endif /* VENDOR_EDIT */
+source "drivers/mux/Kconfig"
+
+source "drivers/sensors/Kconfig"
+
+source "drivers/esoc/Kconfig"
 
 endmenu

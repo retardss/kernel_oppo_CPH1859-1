@@ -1,12 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_IRQ_H
 #define __ASM_IRQ_H
 
-#define IRQ_STACK_SIZE			THREAD_SIZE
-#define IRQ_STACK_START_SP		THREAD_START_SP
-
 #ifndef __ASSEMBLER__
-
-#include <linux/percpu.h>
 
 #include <asm-generic/irq.h>
 #include <asm/thread_info.h>
@@ -45,15 +41,6 @@ extern void set_handle_irq(void (*handle_irq)(struct pt_regs *));
 static inline int nr_legacy_irqs(void)
 {
 	return 0;
-}
-
-static inline bool on_irq_stack(unsigned long sp, int cpu)
-{
-	/* variable names the same as kernel/stacktrace.c */
-	unsigned long low = (unsigned long)per_cpu(irq_stack, cpu);
-	unsigned long high = low + IRQ_STACK_START_SP;
-
-	return (low <= sp && sp <= high);
 }
 
 #endif /* !__ASSEMBLER__ */

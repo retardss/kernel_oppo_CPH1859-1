@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 config PGTABLE_LEVELS
 	int "Page Table Levels" if !IA64_PAGE_SIZE_64KB
 	range 3 4 if !IA64_PAGE_SIZE_64KB
@@ -26,7 +27,6 @@ config IA64
 	select HAVE_FTRACE_MCOUNT_RECORD
 	select HAVE_DYNAMIC_FTRACE if (!ITANIUM)
 	select HAVE_FUNCTION_TRACER
-	select HAVE_DMA_ATTRS
 	select TTY
 	select HAVE_ARCH_TRACEHOOK
 	select HAVE_DMA_API_DEBUG
@@ -40,7 +40,6 @@ config IA64
 	select GENERIC_PENDING_IRQ if SMP
 	select GENERIC_IRQ_SHOW
 	select GENERIC_IRQ_LEGACY
-	select ARCH_WANT_OPTIONAL_GPIOLIB
 	select ARCH_HAVE_NMI_SAFE_CMPXCHG
 	select GENERIC_IOMAP
 	select GENERIC_SMP_IDLE_THREAD
@@ -576,11 +575,7 @@ config PCI_DOMAINS
 config PCI_SYSCALL
 	def_bool PCI
 
-source "drivers/pci/pcie/Kconfig"
-
 source "drivers/pci/Kconfig"
-
-source "drivers/pci/hotplug/Kconfig"
 
 source "drivers/pcmcia/Kconfig"
 

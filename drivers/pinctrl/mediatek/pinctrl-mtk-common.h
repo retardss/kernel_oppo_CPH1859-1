@@ -273,7 +273,14 @@ struct mtk_pinctrl {
  * means when user set smt, input enable is set at the same time. So they
  * also need special control. If special control is success, this should
  * return 0, otherwise return non-zero value.
- *
+ * @spec_pinmux_set: In some cases, there are two pinmux functions share
+ * the same value in the same segment of pinmux control register. If user
+ * want to use one of the two functions, they need an extra bit setting to
+ * select the right one.
+ * @spec_dir_set: In very few SoCs, direction control registers are not
+ * arranged continuously, they may be cut to parts. So they need special
+ * dir setting.
+
  * @dir_offset: The direction register offset.
  * @pullen_offset: The pull-up/pull-down enable register offset.
  * @pinmux_offset: The pinmux register offset.
@@ -351,44 +358,20 @@ struct mtk_pinctrl_devdata {
 	void (*spec_pinmux_set)(struct regmap *reg, unsigned int pin,
 			unsigned int mode);
 	void (*spec_dir_set)(unsigned int *reg_addr, unsigned int pin);
-	int (*spec_pull_get)(struct regmap *reg, unsigned int pin);
-	int (*spec_ies_get)(struct regmap *reg, unsigned int pin);
-	int (*spec_smt_get)(struct regmap *reg, unsigned int pin);
-	int (*spec_set_gpio_mode)(unsigned long pin, unsigned long mode);
-	int (*mt_set_gpio_dir)(unsigned long pin, unsigned long dir);
-	int (*mt_get_gpio_dir)(unsigned long pin);
-	int (*mt_get_gpio_out)(unsigned long pin);
-	int (*mt_set_gpio_out)(unsigned long pin, unsigned long output);
-	int (*mt_set_gpio_driving)(unsigned long pin, unsigned long strength);
-	int (*mt_get_gpio_in)(unsigned long pin);
-	int (*mt_set_gpio_ies)(unsigned long pin, unsigned long enable);
-	int (*mt_set_gpio_smt)(unsigned long pin, unsigned long enable);
-	int (*mt_set_gpio_slew_rate)(unsigned long pin, unsigned long enable);
-	int (*mt_set_gpio_pull_enable)(unsigned long pin, unsigned long enable);
-	int (*mt_set_gpio_pull_select)(unsigned long pin, unsigned long select);
-	int (*mt_set_gpio_pull_resistor)(unsigned long pin, unsigned long resistors);
-	int (*mtk_pctl_set_pull)(struct mtk_pinctrl *pctl,
-		int pin, bool enable, bool isup, unsigned int arg);
-	int (*mtk_pctl_get_pull)(struct mtk_pinctrl *pctl,
-		int pin, bool enable, bool isup, unsigned int arg);
-	int (*mtk_pctl_get_pull_sel)(struct mtk_pinctrl *pctl, int pin);
-	int (*mtk_pctl_get_pull_en)(struct mtk_pinctrl *pctl, int pin);
-	unsigned int (*spec_debounce_select)(unsigned debounce);
-	unsigned int    dir_offset;
-	unsigned int    ies_offset;
-	unsigned int    smt_offset;
-	unsigned int    pullen_offset;
-	unsigned int    pullsel_offset;
-	unsigned int    drv_offset;
-	unsigned int    dout_offset;
-	unsigned int    din_offset;
-	unsigned int    pinmux_offset;
-	unsigned short  type1_start;
-	unsigned short  type1_end;
-	unsigned char   port_shf;
-	unsigned char   port_mask;
-	unsigned char   port_align;
-	unsigned int    regmap_num;
+	unsigned int dir_offset;
+	unsigned int ies_offset;
+	unsigned int smt_offset;
+	unsigned int pullen_offset;
+	unsigned int pullsel_offset;
+	unsigned int drv_offset;
+	unsigned int dout_offset;
+	unsigned int din_offset;
+	unsigned int pinmux_offset;
+	unsigned short type1_start;
+	unsigned short type1_end;
+	unsigned char  port_shf;
+	unsigned char  port_mask;
+	unsigned char  port_align;
 	struct mtk_eint_offsets eint_offsets;
 	unsigned int    ap_num;
 	unsigned int    db_cnt;

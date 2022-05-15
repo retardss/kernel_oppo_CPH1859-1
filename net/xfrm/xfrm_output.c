@@ -101,10 +101,22 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
 		spin_unlock_bh(&x->lock);
 
 		skb_dst_force(skb);
+		if (!skb_dst(skb)) {
+			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
+			err = -EHOSTUNREACH;
+			goto error_nolock;
+		}
 
-		err = x->type->output(x, skb);
-		if (err == -EINPROGRESS)
-			goto out;
+		if (xfrm_offload(skb)) {
+			x->type_offload->encap(x, skb);
+		} else {
+			/* Inner headers are invalid now. */
+			skb->encapsulation = 0;
+
+			err = x->type->output(x, skb);
+			if (err == -EINPROGRESS)
+				goto out;
+		}
 
 resume:
 		if (err) {
@@ -200,10 +212,43 @@ static int xfrm_output_gso(struct net *net, struct sock *sk, struct sk_buff *skb
 int xfrm_output(struct sock *sk, struct sk_buff *skb)
 {
 	struct net *net = dev_net(skb_dst(skb)->dev);
+	struct xfrm_state *x = skb_dst(skb)->xfrm;
 	int err;
 
-	if (skb_is_gso(skb))
-		return xfrm_output_gso(net, sk, skb);
+	secpath_reset(skb);
+
+	if (xfrm_dev_offload_ok(skb, x)) {
+		struct sec_path *sp;
+
+		sp = secpath_dup(skb->sp);
+		if (!sp) {
+			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
+			kfree_skb(skb);
+			return -ENOMEM;
+		}
+		if (skb->sp)
+			secpath_put(skb->sp);
+		skb->sp = sp;
+		skb->encapsulation = 1;
+
+		sp->olen++;
+		sp->xvec[skb->sp->len++] = x;
+		xfrm_state_hold(x);
+
+		if (skb_is_gso(skb)) {
+			if (skb->inner_protocol)
+				return xfrm_output_gso(net, sk, skb);
+
+			skb_shinfo(skb)->gso_type |= SKB_GSO_ESP;
+			goto out;
+		}
+
+		if (x->xso.dev && x->xso.dev->features & NETIF_F_HW_ESP_TX_CSUM)
+			goto out;
+	} else {
+		if (skb_is_gso(skb))
+			return xfrm_output_gso(net, sk, skb);
+	}
 
 	if (skb->ip_summed == CHECKSUM_PARTIAL) {
 		err = skb_checksum_help(skb);
@@ -214,6 +259,7 @@ int xfrm_output(struct sock *sk, struct sk_buff *skb)
 		}
 	}
 
+out:
 	return xfrm_output2(net, sk, skb);
 }
 EXPORT_SYMBOL_GPL(xfrm_output);
@@ -240,16 +286,16 @@ void xfrm_local_error(struct sk_buff *skb, int mtu)
 
 	if (skb->protocol == htons(ETH_P_IP))
 		proto = AF_INET;
-	else if (skb->protocol == htons(ETH_P_IPV6))
+	else if (skb->protocol == htons(ETH_P_IPV6) &&
+		 skb->sk->sk_family == AF_INET6)
 		proto = AF_INET6;
 	else
 		return;
 
 	afinfo = xfrm_state_get_afinfo(proto);
-	if (!afinfo)
-		return;
-
-	afinfo->local_error(skb, mtu);
-	xfrm_state_put_afinfo(afinfo);
+	if (afinfo) {
+		afinfo->local_error(skb, mtu);
+		rcu_read_unlock();
+	}
 }
 EXPORT_SYMBOL_GPL(xfrm_local_error);

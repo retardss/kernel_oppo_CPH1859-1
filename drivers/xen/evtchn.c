@@ -55,6 +55,7 @@
 #include <xen/xen.h>
 #include <xen/events.h>
 #include <xen/evtchn.h>
+#include <xen/xen-ops.h>
 #include <asm/xen/hypervisor.h>
 
 struct per_user_data {
@@ -73,7 +74,11 @@ struct per_user_data {
 	wait_queue_head_t evtchn_wait;
 	struct fasync_struct *evtchn_async_queue;
 	const char *name;
+
+	domid_t restrict_domid;
 };
+
+#define UNRESTRICTED_DOMID ((domid_t)-1)
 
 struct user_evtchn {
 	struct rb_node node;
@@ -81,18 +86,6 @@ struct user_evtchn {
 	unsigned port;
 	bool enabled;
 };
-
-static evtchn_port_t *evtchn_alloc_ring(unsigned int size)
-{
-	evtchn_port_t *ring;
-	size_t s = size * sizeof(*ring);
-
-	ring = kmalloc(s, GFP_KERNEL);
-	if (!ring)
-		ring = vmalloc(s);
-
-	return ring;
-}
 
 static void evtchn_free_ring(evtchn_port_t *ring)
 {
@@ -120,7 +113,7 @@ static int add_evtchn(struct per_user_data *u, struct user_evtchn *evtchn)
 	while (*new) {
 		struct user_evtchn *this;
 
-		this = container_of(*new, struct user_evtchn, node);
+		this = rb_entry(*new, struct user_evtchn, node);
 
 		parent = *new;
 		if (this->port < evtchn->port)
@@ -152,7 +145,7 @@ static struct user_evtchn *find_evtchn(struct per_user_data *u, unsigned port)
 	while (node) {
 		struct user_evtchn *evtchn;
 
-		evtchn = container_of(node, struct user_evtchn, node);
+		evtchn = rb_entry(node, struct user_evtchn, node);
 
 		if (evtchn->port < port)
 			node = node->rb_left;
@@ -173,7 +166,6 @@ static irqreturn_t evtchn_interrupt(int irq, void *data)
 	     "Interrupt for port %d, but apparently not enabled; per-user %p\n",
 	     evtchn->port, u);
 
-	disable_irq_nosync(irq);
 	evtchn->enabled = false;
 
 	spin_lock(&u->ring_prod_lock);
@@ -299,7 +291,7 @@ static ssize_t evtchn_write(struct file *file, const char __user *buf,
 		evtchn = find_evtchn(u, port);
 		if (evtchn && !evtchn->enabled) {
 			evtchn->enabled = true;
-			enable_irq(irq_from_evtchn(port));
+			xen_irq_lateeoi(irq_from_evtchn(port), 0);
 		}
 	}
 
@@ -329,7 +321,7 @@ static int evtchn_resize_ring(struct per_user_data *u)
 	else
 		new_size = 2 * u->ring_size;
 
-	new_ring = evtchn_alloc_ring(new_size);
+	new_ring = kvmalloc(new_size * sizeof(*new_ring), GFP_KERNEL);
 	if (!new_ring)
 		return -ENOMEM;
 
@@ -399,8 +391,8 @@ static int evtchn_bind_to_user(struct per_user_data *u, int port)
 	if (rc < 0)
 		goto err;
 
-	rc = bind_evtchn_to_irqhandler(port, evtchn_interrupt, 0,
-				       u->name, evtchn);
+	rc = bind_evtchn_to_irqhandler_lateeoi(port, evtchn_interrupt, 0,
+					       u->name, evtchn);
 	if (rc < 0)
 		goto err;
 
@@ -428,6 +420,36 @@ static void evtchn_unbind_from_user(struct per_user_data *u,
 	del_evtchn(u, evtchn);
 }
 
+static DEFINE_PER_CPU(int, bind_last_selected_cpu);
+
+static void evtchn_bind_interdom_next_vcpu(int evtchn)
+{
+	unsigned int selected_cpu, irq;
+	struct irq_desc *desc;
+	unsigned long flags;
+
+	irq = irq_from_evtchn(evtchn);
+	desc = irq_to_desc(irq);
+
+	if (!desc)
+		return;
+
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	selected_cpu = this_cpu_read(bind_last_selected_cpu);
+	selected_cpu = cpumask_next_and(selected_cpu,
+			desc->irq_common_data.affinity, cpu_online_mask);
+
+	if (unlikely(selected_cpu >= nr_cpu_ids))
+		selected_cpu = cpumask_first_and(desc->irq_common_data.affinity,
+				cpu_online_mask);
+
+	this_cpu_write(bind_last_selected_cpu, selected_cpu);
+
+	/* unmask expects irqs to be disabled */
+	xen_set_affinity_evtchn(desc, selected_cpu);
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+}
+
 static long evtchn_ioctl(struct file *file,
 			 unsigned int cmd, unsigned long arg)
 {
@@ -443,12 +465,16 @@ static long evtchn_ioctl(struct file *file,
 		struct ioctl_evtchn_bind_virq bind;
 		struct evtchn_bind_virq bind_virq;
 
+		rc = -EACCES;
+		if (u->restrict_domid != UNRESTRICTED_DOMID)
+			break;
+
 		rc = -EFAULT;
 		if (copy_from_user(&bind, uarg, sizeof(bind)))
 			break;
 
 		bind_virq.virq = bind.virq;
-		bind_virq.vcpu = 0;
+		bind_virq.vcpu = xen_vcpu_nr(0);
 		rc = HYPERVISOR_event_channel_op(EVTCHNOP_bind_virq,
 						 &bind_virq);
 		if (rc != 0)
@@ -468,6 +494,11 @@ static long evtchn_ioctl(struct file *file,
 		if (copy_from_user(&bind, uarg, sizeof(bind)))
 			break;
 
+		rc = -EACCES;
+		if (u->restrict_domid != UNRESTRICTED_DOMID &&
+		    u->restrict_domid != bind.remote_domain)
+			break;
+
 		bind_interdomain.remote_dom  = bind.remote_domain;
 		bind_interdomain.remote_port = bind.remote_port;
 		rc = HYPERVISOR_event_channel_op(EVTCHNOP_bind_interdomain,
@@ -476,14 +507,20 @@ static long evtchn_ioctl(struct file *file,
 			break;
 
 		rc = evtchn_bind_to_user(u, bind_interdomain.local_port);
-		if (rc == 0)
+		if (rc == 0) {
 			rc = bind_interdomain.local_port;
+			evtchn_bind_interdom_next_vcpu(rc);
+		}
 		break;
 	}
 
 	case IOCTL_EVTCHN_BIND_UNBOUND_PORT: {
 		struct ioctl_evtchn_bind_unbound_port bind;
 		struct evtchn_alloc_unbound alloc_unbound;
+
+		rc = -EACCES;
+		if (u->restrict_domid != UNRESTRICTED_DOMID)
+			break;
 
 		rc = -EFAULT;
 		if (copy_from_user(&bind, uarg, sizeof(bind)))
@@ -553,6 +590,27 @@ static long evtchn_ioctl(struct file *file,
 		break;
 	}
 
+	case IOCTL_EVTCHN_RESTRICT_DOMID: {
+		struct ioctl_evtchn_restrict_domid ierd;
+
+		rc = -EACCES;
+		if (u->restrict_domid != UNRESTRICTED_DOMID)
+			break;
+
+		rc = -EFAULT;
+		if (copy_from_user(&ierd, uarg, sizeof(ierd)))
+		    break;
+
+		rc = -EINVAL;
+		if (ierd.domid == 0 || ierd.domid >= DOMID_FIRST_RESERVED)
+			break;
+
+		u->restrict_domid = ierd.domid;
+		rc = 0;
+
+		break;
+	}
+
 	default:
 		rc = -ENOSYS;
 		break;
@@ -600,6 +658,8 @@ static int evtchn_open(struct inode *inode, struct file *filp)
 	mutex_init(&u->bind_mutex);
 	mutex_init(&u->ring_cons_mutex);
 	spin_lock_init(&u->ring_prod_lock);
+
+	u->restrict_domid = UNRESTRICTED_DOMID;
 
 	filp->private_data = u;
 

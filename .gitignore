@@ -7,37 +7,40 @@
 # command after changing this file, to see if there are
 # any tracked files which get ignored after the change.
 #
-# Normal rules
+# Normal rules (sorted alphabetically)
 #
 .*
+*.a
+*.bin
+*.bz2
+*.c.[012]*.*
+*.dtb
+*.dtb.S
+*.dwo
+*.elf
+*.gcno
+*.gz
+*.i
+*.ko
+*.ll
+*.lst
+*.lz4
+*.lzma
+*.lzo
+*.mod.c
 *.o
 *.o.*
-*.a
+*.order
+*.patch
 *.s
-*.ko
 *.so
 *.so.dbg
-*.mod.c
-*.i
-*.lst
-*.symtypes
-*.order
-*.elf
-*.bin
-*.tar
-*.gz
-*.bz2
-*.lzma
-*.xz
-*.lz4
-*.lzo
-*.patch
-*.gcno
-*.ll
-modules.builtin
-Module.symvers
-*.dwo
 *.su
+*.symtypes
+*.tar
+*.xz
+Module.symvers
+modules.builtin
 
 #
 # Top-level generic files
@@ -53,6 +56,11 @@ Module.symvers
 /Module.markers
 
 #
+# RPM spec file (make rpm-pkg)
+#
+/*.spec
+
+#
 # Debian directory (make deb-pkg)
 #
 /debian/
@@ -63,10 +71,11 @@ Module.symvers
 /tar-install/
 
 #
-# git files that we don't want to ignore even it they are dot-files
+# git files that we don't want to ignore even if they are dot-files
 #
 !.gitignore
 !.mailmap
+!.cocciconfig
 
 #
 # Generated include files
@@ -115,11 +124,4 @@ all.config
 *.kdev4
 
 # fetched Android config fragments
-android/configs/android-*.cfg
-
-# Build directories
-out/
-clang/
-gcc/
-gcc32/
-AnyKernel/
+kernel/configs/android-*.cfg

@@ -18,12 +18,13 @@
  * Author: Will Deacon <will.deacon@arm.com>
  */
 
-#include <linux/kernel.h>
+#include <linux/cache.h>
 #include <linux/clocksource.h>
 #include <linux/elf.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/gfp.h>
+#include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
@@ -36,9 +37,8 @@
 #include <asm/vdso.h>
 #include <asm/vdso_datapage.h>
 
-extern char vdso_start, vdso_end;
-static unsigned long vdso_pages;
-static struct page **vdso_pagelist;
+extern char vdso_start[], vdso_end[];
+static unsigned long vdso_pages __ro_after_init;
 
 /*
  * The vDSO data page.
@@ -53,7 +53,7 @@ struct vdso_data *vdso_data = &vdso_data_store.data;
 /*
  * Create and map the vectors page for AArch32 tasks.
  */
-static struct page *vectors_page[1];
+static struct page *vectors_page[1] __ro_after_init;
 
 static int __init alloc_vectors_page(void)
 {
@@ -95,7 +95,8 @@ int aarch32_setup_vectors_page(struct linux_binprm *bprm, int uses_interp)
 	};
 	void *ret;
 
-	down_write(&mm->mmap_sem);
+	if (down_write_killable(&mm->mmap_sem))
+		return -EINTR;
 	current->mm->context.vdso = (void *)addr;
 
 	/* Map vectors page at the high address. */
@@ -109,21 +110,44 @@ int aarch32_setup_vectors_page(struct linux_binprm *bprm, int uses_interp)
 }
 #endif /* CONFIG_COMPAT */
 
-static struct vm_special_mapping vdso_spec[2];
+static int vdso_mremap(const struct vm_special_mapping *sm,
+		struct vm_area_struct *new_vma)
+{
+	unsigned long new_size = new_vma->vm_end - new_vma->vm_start;
+	unsigned long vdso_size = vdso_end - vdso_start;
+
+	if (vdso_size != new_size)
+		return -EINVAL;
+
+	current->mm->context.vdso = (void *)new_vma->vm_start;
+
+	return 0;
+}
+
+static struct vm_special_mapping vdso_spec[2] __ro_after_init = {
+	{
+		.name	= "[vvar]",
+	},
+	{
+		.name	= "[vdso]",
+		.mremap = vdso_mremap,
+	},
+};
 
 static int __init vdso_init(void)
 {
 	int i;
+	struct page **vdso_pagelist;
 	unsigned long pfn;
 
-	if (memcmp(&vdso_start, "\177ELF", 4)) {
+	if (memcmp(vdso_start, "\177ELF", 4)) {
 		pr_err("vDSO is not a valid ELF object!\n");
 		return -EINVAL;
 	}
 
-	vdso_pages = (&vdso_end - &vdso_start) >> PAGE_SHIFT;
+	vdso_pages = (vdso_end - vdso_start) >> PAGE_SHIFT;
 	pr_info("vdso: %ld pages (%ld code @ %p, %ld data @ %p)\n",
-		vdso_pages + 1, vdso_pages, &vdso_start, 1L, vdso_data);
+		vdso_pages + 1, vdso_pages, vdso_start, 1L, vdso_data);
 
 	/* Allocate the vDSO pagelist, plus a page for the data. */
 	vdso_pagelist = kcalloc(vdso_pages + 1, sizeof(struct page *),
@@ -136,21 +160,13 @@ static int __init vdso_init(void)
 
 
 	/* Grab the vDSO code pages. */
-	pfn = sym_to_pfn(&vdso_start);
+	pfn = sym_to_pfn(vdso_start);
 
 	for (i = 0; i < vdso_pages; i++)
 		vdso_pagelist[i + 1] = pfn_to_page(pfn + i);
 
-	/* Populate the special mapping structures */
-	vdso_spec[0] = (struct vm_special_mapping) {
-		.name	= "[vvar]",
-		.pages	= vdso_pagelist,
-	};
-
-	vdso_spec[1] = (struct vm_special_mapping) {
-		.name	= "[vdso]",
-		.pages	= &vdso_pagelist[1],
-	};
+	vdso_spec[0].pages = &vdso_pagelist[0];
+	vdso_spec[1].pages = &vdso_pagelist[1];
 
 	return 0;
 }
@@ -167,7 +183,8 @@ int arch_setup_additional_pages(struct linux_binprm *bprm,
 	/* Be sure to map the data page */
 	vdso_mapping_len = vdso_text_len + PAGE_SIZE;
 
-	down_write(&mm->mmap_sem);
+	if (down_write_killable(&mm->mmap_sem))
+		return -EINTR;
 	vdso_base = get_unmapped_area(NULL, 0, vdso_mapping_len, 0, 0);
 	if (IS_ERR_VALUE(vdso_base)) {
 		ret = ERR_PTR(vdso_base);
@@ -203,7 +220,7 @@ up_fail:
  */
 void update_vsyscall(struct timekeeper *tk)
 {
-	u32 use_syscall = strcmp(tk->tkr_mono.clock->name, "arch_sys_counter");
+	u32 use_syscall = !tk->tkr_mono.clock->archdata.vdso_direct;
 
 	++vdso_data->tb_seq_count;
 	smp_wmb();
@@ -214,6 +231,9 @@ void update_vsyscall(struct timekeeper *tk)
 							tk->tkr_mono.shift;
 	vdso_data->wtm_clock_sec		= tk->wall_to_monotonic.tv_sec;
 	vdso_data->wtm_clock_nsec		= tk->wall_to_monotonic.tv_nsec;
+
+	/* Read without the seqlock held by clock_getres() */
+	WRITE_ONCE(vdso_data->hrtimer_res, hrtimer_resolution);
 
 	if (!use_syscall) {
 		/* tkr_mono.cycle_last == tkr_raw.cycle_last */

@@ -79,8 +79,6 @@ static struct resource s3c64xx_iis1_resource[] = {
 
 static struct s3c_audio_pdata i2s1_pdata = {
 	.cfg_gpio = s3c64xx_i2s_cfg_gpio,
-	.dma_playback = DMACH_I2S1_OUT,
-	.dma_capture = DMACH_I2S1_IN,
 };
 
 struct platform_device s3c64xx_device_iis1 = {
@@ -103,9 +101,7 @@ static struct s3c_audio_pdata i2sv4_pdata = {
 	.dma_playback = DMACH_HSI_I2SV40_TX,
 	.dma_capture = DMACH_HSI_I2SV40_RX,
 	.type = {
-		.i2s = {
-			.quirks = QUIRK_PRI_6CHAN,
-		},
+		.quirks = QUIRK_PRI_6CHAN,
 	},
 };
 
@@ -204,9 +200,6 @@ static struct resource s3c64xx_ac97_resource[] = {
 };
 
 static struct s3c_audio_pdata s3c_ac97_pdata = {
-	.dma_playback = DMACH_AC97_PCMOUT,
-	.dma_capture = DMACH_AC97_PCMIN,
-	.dma_capture_mic = DMACH_AC97_MICIN,
 };
 
 static u64 s3c64xx_ac97_dmamask = DMA_BIT_MASK(32);

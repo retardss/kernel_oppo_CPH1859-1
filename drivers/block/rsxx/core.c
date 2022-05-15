@@ -203,14 +203,11 @@ static ssize_t rsxx_cram_write(struct file *fp, const char __user *ubuf,
 	char *buf;
 	ssize_t st;
 
-	buf = kzalloc(cnt, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
+	buf = memdup_user(ubuf, cnt);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
 
-	st = copy_from_user(buf, ubuf, cnt);
-	if (!st)
-		st = rsxx_creg_write(card, CREG_ADD_CRAM + (u32)*ppos, cnt,
-				     buf, 1);
+	st = rsxx_creg_write(card, CREG_ADD_CRAM + (u32)*ppos, cnt, buf, 1);
 	kfree(buf);
 	if (st)
 		return st;
@@ -1028,8 +1025,10 @@ static void rsxx_pci_remove(struct pci_dev *dev)
 
 	cancel_work_sync(&card->event_work);
 
+	destroy_workqueue(card->event_wq);
 	rsxx_destroy_dev(card);
 	rsxx_dma_destroy(card);
+	destroy_workqueue(card->creg_ctrl.creg_wq);
 
 	spin_lock_irqsave(&card->irq_lock, flags);
 	rsxx_disable_ier_and_isr(card, CR_INTR_ALL);

@@ -22,6 +22,8 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/interrupt.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -50,7 +52,7 @@
 #include <asm/perfmon.h>
 #include <asm/processor.h>
 #include <asm/signal.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/delay.h>
 
 #ifdef CONFIG_PERFMON
@@ -2332,8 +2334,7 @@ pfm_smpl_buffer_alloc(struct task_struct *task, struct file *filp, pfm_context_t
 	 */
 	insert_vm_struct(mm, vma);
 
-	vm_stat_account(vma->vm_mm, vma->vm_flags, vma->vm_file,
-							vma_pages(vma));
+	vm_stat_account(vma->vm_mm, vma->vm_flags, vma_pages(vma));
 	up_write(&task->mm->mmap_sem);
 
 	/*

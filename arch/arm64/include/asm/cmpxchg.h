@@ -45,10 +45,8 @@ static inline unsigned long __xchg_case_##name(unsigned long x,		\
 	"	cbnz	%w1, 1b\n"					\
 	"	" #mb,							\
 	/* LSE atomics */						\
-	"	nop\n"							\
-	"	nop\n"							\
 	"	swp" #acq_lse #rel #sz "\t%" #w "3, %" #w "0, %2\n"	\
-	"	nop\n"							\
+		__nops(3)						\
 	"	" #nop_lse)						\
 	: "=&r" (ret), "=&r" (tmp), "+Q" (*(unsigned long *)ptr)	\
 	: "r" (x)							\
@@ -77,7 +75,7 @@ __XCHG_CASE( ,  ,  mb_8, dmb ish, nop,  , a, l, "memory")
 #undef __XCHG_CASE
 
 #define __XCHG_GEN(sfx)							\
-static inline unsigned long __xchg##sfx(unsigned long x,		\
+static __always_inline  unsigned long __xchg##sfx(unsigned long x,	\
 					volatile void *ptr,		\
 					int size)			\
 {									\
@@ -119,7 +117,7 @@ __XCHG_GEN(_mb)
 #define xchg(...)		__xchg_wrapper( _mb, __VA_ARGS__)
 
 #define __CMPXCHG_GEN(sfx)						\
-static inline unsigned long __cmpxchg##sfx(volatile void *ptr,		\
+static __always_inline unsigned long __cmpxchg##sfx(volatile void *ptr,	\
 					   unsigned long old,		\
 					   unsigned long new,		\
 					   int size)			\
@@ -225,5 +223,58 @@ __CMPXCHG_GEN(_mb)
 	preempt_enable();						\
 	__ret;								\
 })
+
+#define __CMPWAIT_CASE(w, sz, name)					\
+static inline void __cmpwait_case_##name(volatile void *ptr,		\
+					 unsigned long val)		\
+{									\
+	unsigned long tmp;						\
+									\
+	asm volatile(							\
+	"	sevl\n"							\
+	"	wfe\n"							\
+	"	ldxr" #sz "\t%" #w "[tmp], %[v]\n"			\
+	"	eor	%" #w "[tmp], %" #w "[tmp], %" #w "[val]\n"	\
+	"	cbnz	%" #w "[tmp], 1f\n"				\
+	"	wfe\n"							\
+	"1:"								\
+	: [tmp] "=&r" (tmp), [v] "+Q" (*(unsigned long *)ptr)		\
+	: [val] "r" (val));						\
+}
+
+__CMPWAIT_CASE(w, b, 1);
+__CMPWAIT_CASE(w, h, 2);
+__CMPWAIT_CASE(w,  , 4);
+__CMPWAIT_CASE( ,  , 8);
+
+#undef __CMPWAIT_CASE
+
+#define __CMPWAIT_GEN(sfx)						\
+static __always_inline void __cmpwait##sfx(volatile void *ptr,		\
+				  unsigned long val,			\
+				  int size)				\
+{									\
+	switch (size) {							\
+	case 1:								\
+		return __cmpwait_case##sfx##_1(ptr, (u8)val);		\
+	case 2:								\
+		return __cmpwait_case##sfx##_2(ptr, (u16)val);		\
+	case 4:								\
+		return __cmpwait_case##sfx##_4(ptr, val);		\
+	case 8:								\
+		return __cmpwait_case##sfx##_8(ptr, val);		\
+	default:							\
+		BUILD_BUG();						\
+	}								\
+									\
+	unreachable();							\
+}
+
+__CMPWAIT_GEN()
+
+#undef __CMPWAIT_GEN
+
+#define __cmpwait_relaxed(ptr, val) \
+	__cmpwait((ptr), (unsigned long)(val), sizeof(*(ptr)))
 
 #endif	/* __ASM_CMPXCHG_H */

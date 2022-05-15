@@ -11,10 +11,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  * common vpss system module platform driver for all video drivers.
  */
 #include <linux/module.h>
@@ -261,8 +257,8 @@ static int dm355_enable_clock(enum vpss_clock_sel clock_sel, int en)
 		shift = 6;
 		break;
 	default:
-		printk(KERN_ERR "dm355_enable_clock:"
-				" Invalid selector: %d\n", clock_sel);
+		printk(KERN_ERR "dm355_enable_clock: Invalid selector: %d\n",
+		       clock_sel);
 		return -EINVAL;
 	}
 
@@ -421,8 +417,7 @@ static int vpss_probe(struct platform_device *pdev)
 	else if (!strcmp(platform_name, "dm644x_vpss"))
 		oper_cfg.platform = DM644X;
 	else {
-		dev_err(&pdev->dev, "vpss driver not supported on"
-			" this platform\n");
+		dev_err(&pdev->dev, "vpss driver not supported on this platform\n");
 		return -ENODEV;
 	}
 
@@ -519,14 +514,31 @@ static void vpss_exit(void)
 
 static int __init vpss_init(void)
 {
+	int ret;
+
 	if (!request_mem_region(VPSS_CLK_CTRL, 4, "vpss_clock_control"))
 		return -EBUSY;
 
 	oper_cfg.vpss_regs_base2 = ioremap(VPSS_CLK_CTRL, 4);
-	writel(VPSS_CLK_CTRL_VENCCLKEN |
-		     VPSS_CLK_CTRL_DACCLKEN, oper_cfg.vpss_regs_base2);
+	if (unlikely(!oper_cfg.vpss_regs_base2)) {
+		ret = -ENOMEM;
+		goto err_ioremap;
+	}
 
-	return platform_driver_register(&vpss_driver);
+	writel(VPSS_CLK_CTRL_VENCCLKEN |
+	       VPSS_CLK_CTRL_DACCLKEN, oper_cfg.vpss_regs_base2);
+
+	ret = platform_driver_register(&vpss_driver);
+	if (ret)
+		goto err_pd_register;
+
+	return 0;
+
+err_pd_register:
+	iounmap(oper_cfg.vpss_regs_base2);
+err_ioremap:
+	release_mem_region(VPSS_CLK_CTRL, 4);
+	return ret;
 }
 subsys_initcall(vpss_init);
 module_exit(vpss_exit);

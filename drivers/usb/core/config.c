@@ -1,3 +1,8 @@
+/*
+ * Released under the GPLv2 only.
+ * SPDX-License-Identifier: GPL-2.0
+ */
+
 #include <linux/usb.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/hcd.h>
@@ -43,6 +48,27 @@ static int find_next_descriptor(unsigned char *buffer, int size,
 	return buffer - buffer0;
 }
 
+static void usb_parse_ssp_isoc_endpoint_companion(struct device *ddev,
+		int cfgno, int inum, int asnum, struct usb_host_endpoint *ep,
+		unsigned char *buffer, int size)
+{
+	struct usb_ssp_isoc_ep_comp_descriptor *desc;
+
+	/*
+	 * The SuperSpeedPlus Isoc endpoint companion descriptor immediately
+	 * follows the SuperSpeed Endpoint Companion descriptor
+	 */
+	desc = (struct usb_ssp_isoc_ep_comp_descriptor *) buffer;
+	if (desc->bDescriptorType != USB_DT_SSP_ISOC_ENDPOINT_COMP ||
+	    size < USB_DT_SSP_ISOC_EP_COMP_SIZE) {
+		dev_warn(ddev, "Invalid SuperSpeedPlus isoc endpoint companion"
+			 "for config %d interface %d altsetting %d ep %d.\n",
+			 cfgno, inum, asnum, ep->desc.bEndpointAddress);
+		return;
+	}
+	memcpy(&ep->ssp_isoc_ep_comp, desc, USB_DT_SSP_ISOC_EP_COMP_SIZE);
+}
+
 static void usb_parse_ss_endpoint_companion(struct device *ddev, int cfgno,
 		int inum, int asnum, struct usb_host_endpoint *ep,
 		unsigned char *buffer, int size)
@@ -54,6 +80,7 @@ static void usb_parse_ss_endpoint_companion(struct device *ddev, int cfgno,
 	 * be the first thing immediately following the endpoint descriptor.
 	 */
 	desc = (struct usb_ss_ep_comp_descriptor *) buffer;
+
 	if (desc->bDescriptorType != USB_DT_SS_ENDPOINT_COMP ||
 			size < USB_DT_SS_EP_COMP_SIZE) {
 		dev_warn(ddev, "No SuperSpeed endpoint companion for config %d "
@@ -76,7 +103,8 @@ static void usb_parse_ss_endpoint_companion(struct device *ddev, int cfgno,
 					ep->desc.wMaxPacketSize;
 		return;
 	}
-
+	buffer += desc->bLength;
+	size -= desc->bLength;
 	memcpy(&ep->ss_ep_comp, desc, USB_DT_SS_EP_COMP_SIZE);
 
 	/* Check the various values */
@@ -112,6 +140,7 @@ static void usb_parse_ss_endpoint_companion(struct device *ddev, int cfgno,
 				cfgno, inum, asnum, ep->desc.bEndpointAddress);
 		ep->ss_ep_comp.bmAttributes = 16;
 	} else if (usb_endpoint_xfer_isoc(&ep->desc) &&
+		   !USB_SS_SSP_ISOC_COMP(desc->bmAttributes) &&
 		   USB_SS_MULT(desc->bmAttributes) > 3) {
 		dev_warn(ddev, "Isoc endpoint has Mult of %d in "
 				"config %d interface %d altsetting %d ep %d: "
@@ -140,6 +169,11 @@ static void usb_parse_ss_endpoint_companion(struct device *ddev, int cfgno,
 				max_tx);
 		ep->ss_ep_comp.wBytesPerInterval = cpu_to_le16(max_tx);
 	}
+	/* Parse a possible SuperSpeedPlus isoc ep companion descriptor */
+	if (usb_endpoint_xfer_isoc(&ep->desc) &&
+	    USB_SS_SSP_ISOC_COMP(desc->bmAttributes))
+		usb_parse_ssp_isoc_endpoint_companion(ddev, cfgno, inum, asnum,
+							ep, buffer, size);
 }
 
 static const unsigned short low_speed_maxpacket_maxes[4] = {
@@ -169,10 +203,60 @@ static const unsigned short super_speed_maxpacket_maxes[4] = {
 	[USB_ENDPOINT_XFER_INT] = 1024,
 };
 
-static int usb_parse_endpoint(struct device *ddev, int cfgno, int inum,
-    int asnum, struct usb_host_interface *ifp, int num_ep,
-    unsigned char *buffer, int size)
+static bool endpoint_is_duplicate(struct usb_endpoint_descriptor *e1,
+		struct usb_endpoint_descriptor *e2)
 {
+	if (e1->bEndpointAddress == e2->bEndpointAddress)
+		return true;
+
+	if (usb_endpoint_xfer_control(e1) || usb_endpoint_xfer_control(e2)) {
+		if (usb_endpoint_num(e1) == usb_endpoint_num(e2))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Check for duplicate endpoint addresses in other interfaces and in the
+ * altsetting currently being parsed.
+ */
+static bool config_endpoint_is_duplicate(struct usb_host_config *config,
+		int inum, int asnum, struct usb_endpoint_descriptor *d)
+{
+	struct usb_endpoint_descriptor *epd;
+	struct usb_interface_cache *intfc;
+	struct usb_host_interface *alt;
+	int i, j, k;
+
+	for (i = 0; i < config->desc.bNumInterfaces; ++i) {
+		intfc = config->intf_cache[i];
+
+		for (j = 0; j < intfc->num_altsetting; ++j) {
+			alt = &intfc->altsetting[j];
+
+			if (alt->desc.bInterfaceNumber == inum &&
+					alt->desc.bAlternateSetting != asnum)
+				continue;
+
+			for (k = 0; k < alt->desc.bNumEndpoints; ++k) {
+				epd = &alt->endpoint[k].desc;
+
+				if (endpoint_is_duplicate(epd, d))
+					return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+static int usb_parse_endpoint(struct device *ddev, int cfgno,
+		struct usb_host_config *config, int inum, int asnum,
+		struct usb_host_interface *ifp, int num_ep,
+		unsigned char *buffer, int size)
+{
+	struct usb_device *udev = to_usb_device(ddev);
 	unsigned char *buffer0 = buffer;
 	struct usb_endpoint_descriptor *d;
 	struct usb_host_endpoint *endpoint;
@@ -208,11 +292,18 @@ static int usb_parse_endpoint(struct device *ddev, int cfgno, int inum,
 		goto skip_to_next_endpoint_or_interface_descriptor;
 
 	/* Check for duplicate endpoint addresses */
-	for (i = 0; i < ifp->desc.bNumEndpoints; ++i) {
-		if (ifp->endpoint[i].desc.bEndpointAddress ==
-		    d->bEndpointAddress) {
-			dev_warn(ddev, "config %d interface %d altsetting %d has a duplicate endpoint with address 0x%X, skipping\n",
-			    cfgno, inum, asnum, d->bEndpointAddress);
+	if (config_endpoint_is_duplicate(config, inum, asnum, d)) {
+		dev_warn(ddev, "config %d interface %d altsetting %d has a duplicate endpoint with address 0x%X, skipping\n",
+				cfgno, inum, asnum, d->bEndpointAddress);
+		goto skip_to_next_endpoint_or_interface_descriptor;
+	}
+
+	/* Ignore blacklisted endpoints */
+	if (udev->quirks & USB_QUIRK_ENDPOINT_BLACKLIST) {
+		if (usb_endpoint_is_blacklisted(udev, ifp, d)) {
+			dev_warn(ddev, "config %d interface %d altsetting %d has a blacklisted endpoint with address 0x%X, skipping\n",
+					cfgno, inum, asnum,
+					d->bEndpointAddress);
 			goto skip_to_next_endpoint_or_interface_descriptor;
 		}
 	}
@@ -314,6 +405,51 @@ static int usb_parse_endpoint(struct device *ddev, int cfgno, int inum,
 
 	/* Validate the wMaxPacketSize field */
 	maxp = usb_endpoint_maxp(&endpoint->desc);
+
+	/* Find the highest legal maxpacket size for this endpoint */
+	i = 0;		/* additional transactions per microframe */
+	switch (to_usb_device(ddev)->speed) {
+	case USB_SPEED_LOW:
+		maxpacket_maxes = low_speed_maxpacket_maxes;
+		break;
+	case USB_SPEED_FULL:
+		maxpacket_maxes = full_speed_maxpacket_maxes;
+		break;
+	case USB_SPEED_HIGH:
+		/* Bits 12..11 are allowed only for HS periodic endpoints */
+		if (usb_endpoint_xfer_int(d) || usb_endpoint_xfer_isoc(d)) {
+			i = maxp & (BIT(12) | BIT(11));
+			maxp &= ~i;
+		}
+		/* fallthrough */
+	default:
+		maxpacket_maxes = high_speed_maxpacket_maxes;
+		break;
+	case USB_SPEED_SUPER:
+	case USB_SPEED_SUPER_PLUS:
+		maxpacket_maxes = super_speed_maxpacket_maxes;
+		break;
+	}
+	j = maxpacket_maxes[usb_endpoint_type(&endpoint->desc)];
+
+	if (maxp > j) {
+		dev_warn(ddev, "config %d interface %d altsetting %d endpoint 0x%X has invalid maxpacket %d, setting to %d\n",
+		    cfgno, inum, asnum, d->bEndpointAddress, maxp, j);
+		maxp = j;
+		endpoint->desc.wMaxPacketSize = cpu_to_le16(i | maxp);
+	}
+
+	/*
+	 * Validate the wMaxPacketSize field.
+	 * Some devices have isochronous endpoints in altsetting 0;
+	 * the USB-2 spec requires such endpoints to have wMaxPacketSize = 0
+	 * (see the end of section 5.6.3), so don't warn about them.
+	 */
+	maxp = usb_endpoint_maxp(&endpoint->desc);
+	if (maxp == 0 && !(usb_endpoint_xfer_isoc(d) && asnum == 0)) {
+		dev_warn(ddev, "config %d interface %d altsetting %d endpoint 0x%X has invalid wMaxPacketSize 0\n",
+		    cfgno, inum, asnum, d->bEndpointAddress);
+	}
 
 	/* Find the highest legal maxpacket size for this endpoint */
 	i = 0;		/* additional transactions per microframe */
@@ -483,8 +619,8 @@ static int usb_parse_interface(struct device *ddev, int cfgno,
 		if (((struct usb_descriptor_header *) buffer)->bDescriptorType
 		     == USB_DT_INTERFACE)
 			break;
-		retval = usb_parse_endpoint(ddev, cfgno, inum, asnum, alt,
-		    num_ep, buffer, size);
+		retval = usb_parse_endpoint(ddev, cfgno, config, inum, asnum,
+				alt, num_ep, buffer, size);
 		if (retval < 0)
 			return retval;
 		++n;
@@ -894,7 +1030,7 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 	struct usb_bos_descriptor *bos;
 	struct usb_dev_cap_header *cap;
 	struct usb_ssp_cap_descriptor *ssp_cap;
-	unsigned char *buffer;
+	unsigned char *buffer, *buffer0;
 	int length, total_len, num, i, ssac;
 	__u8 cap_type;
 	int ret;
@@ -905,8 +1041,8 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 
 	/* Get BOS descriptor */
 	ret = usb_get_descriptor(dev, USB_DT_BOS, 0, bos, USB_DT_BOS_SIZE);
-	if (ret < USB_DT_BOS_SIZE) {
-		dev_err(ddev, "unable to get BOS descriptor\n");
+	if (ret < USB_DT_BOS_SIZE || bos->bLength < USB_DT_BOS_SIZE) {
+		dev_err(ddev, "unable to get BOS descriptor or descriptor too short\n");
 		if (ret >= 0)
 			ret = -ENOMSG;
 		kfree(bos);
@@ -939,10 +1075,12 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 			ret = -ENOMSG;
 		goto err;
 	}
+
+	buffer0 = buffer;
 	total_len -= length;
+	buffer += length;
 
 	for (i = 0; i < num; i++) {
-		buffer += length;
 		cap = (struct usb_dev_cap_header *)buffer;
 
 		if (total_len < sizeof(*cap) || total_len < cap->bLength) {
@@ -955,8 +1093,6 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 			dev->bos->desc->bNumDeviceCaps = i;
 			break;
 		}
-
-		total_len -= length;
 
 		if (cap->bDescriptorType != USB_DT_DEVICE_CAPABILITY) {
 			dev_warn(ddev, "descriptor type invalid, skip\n");
@@ -989,10 +1125,23 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 		case USB_PTM_CAP_TYPE:
 			dev->bos->ptm_cap =
 				(struct usb_ptm_cap_descriptor *)buffer;
+			break;
+		case USB_CAP_TYPE_CONFIG_SUMMARY:
+			/* one such desc per function */
+			if (!dev->bos->num_config_summary_desc)
+				dev->bos->config_summary =
+				(struct usb_config_summary_descriptor *)buffer;
+
+			dev->bos->num_config_summary_desc++;
+			break;
 		default:
 			break;
 		}
+
+		total_len -= length;
+		buffer += length;
 	}
+	dev->bos->desc->wTotalLength = cpu_to_le16(buffer - buffer0);
 
 	return 0;
 

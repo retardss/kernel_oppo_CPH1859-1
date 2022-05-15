@@ -513,7 +513,7 @@ static unsigned int sata_fsl_fill_sg(struct ata_queued_cmd *qc, void *cmd_desc,
 	return num_prde;
 }
 
-static void sata_fsl_qc_prep(struct ata_queued_cmd *qc)
+static enum ata_completion_errors sata_fsl_qc_prep(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = qc->ap;
 	struct sata_fsl_port_priv *pp = ap->private_data;
@@ -559,6 +559,8 @@ static void sata_fsl_qc_prep(struct ata_queued_cmd *qc)
 
 	VPRINTK("SATA FSL : xx_qc_prep, di = 0x%x, ttl = %d, num_prde = %d\n",
 		desc_info, ttl_dwords, num_prde);
+
+	return AC_ERR_OK;
 }
 
 static unsigned int sata_fsl_qc_issue(struct ata_queued_cmd *qc)
@@ -1523,8 +1525,6 @@ static int sata_fsl_probe(struct platform_device *ofdev)
 	ata_host_activate(host, irq, sata_fsl_interrupt, SATA_FSL_IRQ_FLAG,
 			  &sata_fsl_sht);
 
-	platform_set_drvdata(ofdev, host);
-
 	host_priv->intr_coalescing.show = fsl_sata_intr_coalescing_show;
 	host_priv->intr_coalescing.store = fsl_sata_intr_coalescing_store;
 	sysfs_attr_init(&host_priv->intr_coalescing.attr);
@@ -1612,7 +1612,7 @@ static int sata_fsl_resume(struct platform_device *op)
 }
 #endif
 
-static struct of_device_id fsl_sata_match[] = {
+static const struct of_device_id fsl_sata_match[] = {
 	{
 		.compatible = "fsl,pq-sata",
 	},

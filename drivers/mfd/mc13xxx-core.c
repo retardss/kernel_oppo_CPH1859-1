@@ -274,9 +274,12 @@ int mc13xxx_adc_do_conversion(struct mc13xxx *mc13xxx, unsigned int mode,
 
 	mc13xxx->adcflags |= MC13XXX_ADC_WORKING;
 
-	mc13xxx_reg_read(mc13xxx, MC13XXX_ADC0, &old_adc0);
+	ret = mc13xxx_reg_read(mc13xxx, MC13XXX_ADC0, &old_adc0);
+	if (ret)
+		goto out;
 
-	adc0 = MC13XXX_ADC0_ADINC1 | MC13XXX_ADC0_ADINC2;
+	adc0 = MC13XXX_ADC0_ADINC1 | MC13XXX_ADC0_ADINC2 |
+	       MC13XXX_ADC0_CHRGRAWDIV;
 	adc1 = MC13XXX_ADC1_ADEN | MC13XXX_ADC1_ADTRIGIGN | MC13XXX_ADC1_ASC;
 
 	if (channel > 7)
@@ -383,16 +386,16 @@ static int mc13xxx_probe_flags_dt(struct mc13xxx *mc13xxx)
 	if (!np)
 		return -ENODEV;
 
-	if (of_get_property(np, "fsl,mc13xxx-uses-adc", NULL))
+	if (of_property_read_bool(np, "fsl,mc13xxx-uses-adc"))
 		mc13xxx->flags |= MC13XXX_USE_ADC;
 
-	if (of_get_property(np, "fsl,mc13xxx-uses-codec", NULL))
+	if (of_property_read_bool(np, "fsl,mc13xxx-uses-codec"))
 		mc13xxx->flags |= MC13XXX_USE_CODEC;
 
-	if (of_get_property(np, "fsl,mc13xxx-uses-rtc", NULL))
+	if (of_property_read_bool(np, "fsl,mc13xxx-uses-rtc"))
 		mc13xxx->flags |= MC13XXX_USE_RTC;
 
-	if (of_get_property(np, "fsl,mc13xxx-uses-touch", NULL))
+	if (of_property_read_bool(np, "fsl,mc13xxx-uses-touch"))
 		mc13xxx->flags |= MC13XXX_USE_TOUCHSCREEN;
 
 	return 0;

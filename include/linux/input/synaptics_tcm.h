@@ -1,9 +1,9 @@
 /*
  * Synaptics TCM touchscreen driver
  *
- * Copyright (C) 2017 Synaptics Incorporated. All rights reserved.
+ * Copyright (C) 2017-2019 Synaptics Incorporated. All rights reserved.
  *
- * Copyright (C) 2017 Scott Lin <scott.lin@tw.synaptics.com>
+ * Copyright (C) 2017-2019 Scott Lin <scott.lin@tw.synaptics.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -45,7 +45,6 @@ struct syna_tcm_board_data {
 	int power_gpio;
 	int power_on_state;
 	int reset_gpio;
-	int display_reset_gpio;
 	int reset_on_state;
 	unsigned int spi_mode;
 	unsigned int power_delay_ms;

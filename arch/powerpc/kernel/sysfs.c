@@ -28,29 +28,27 @@
 
 static DEFINE_PER_CPU(struct cpu, cpu_devices);
 
-/*
- * SMT snooze delay stuff, 64-bit only for now
- */
-
 #ifdef CONFIG_PPC64
 
-/* Time in microseconds we delay before sleeping in the idle loop */
-DEFINE_PER_CPU(long, smt_snooze_delay) = { 100 };
+/*
+ * Snooze delay has not been hooked up since 3fa8cad82b94 ("powerpc/pseries/cpuidle:
+ * smt-snooze-delay cleanup.") and has been broken even longer. As was foretold in
+ * 2014:
+ *
+ *  "ppc64_util currently utilises it. Once we fix ppc64_util, propose to clean
+ *  up the kernel code."
+ *
+ * powerpc-utils stopped using it as of 1.3.8. At some point in the future this
+ * code should be removed.
+ */
 
 static ssize_t store_smt_snooze_delay(struct device *dev,
 				      struct device_attribute *attr,
 				      const char *buf,
 				      size_t count)
 {
-	struct cpu *cpu = container_of(dev, struct cpu, dev);
-	ssize_t ret;
-	long snooze;
-
-	ret = sscanf(buf, "%ld", &snooze);
-	if (ret != 1)
-		return -EINVAL;
-
-	per_cpu(smt_snooze_delay, cpu->dev.id) = snooze;
+	pr_warn_once("%s (%d) stored to unsupported smt_snooze_delay, which has no effect.\n",
+		     current->comm, current->pid);
 	return count;
 }
 
@@ -58,9 +56,9 @@ static ssize_t show_smt_snooze_delay(struct device *dev,
 				     struct device_attribute *attr,
 				     char *buf)
 {
-	struct cpu *cpu = container_of(dev, struct cpu, dev);
-
-	return sprintf(buf, "%ld\n", per_cpu(smt_snooze_delay, cpu->dev.id));
+	pr_warn_once("%s (%d) read from unsupported smt_snooze_delay\n",
+		     current->comm, current->pid);
+	return sprintf(buf, "100\n");
 }
 
 static DEVICE_ATTR(smt_snooze_delay, 0644, show_smt_snooze_delay,
@@ -68,16 +66,10 @@ static DEVICE_ATTR(smt_snooze_delay, 0644, show_smt_snooze_delay,
 
 static int __init setup_smt_snooze_delay(char *str)
 {
-	unsigned int cpu;
-	long snooze;
-
 	if (!cpu_has_feature(CPU_FTR_SMT))
 		return 1;
 
-	snooze = simple_strtol(str, NULL, 10);
-	for_each_possible_cpu(cpu)
-		per_cpu(smt_snooze_delay, cpu) = snooze;
-
+	pr_warn("smt-snooze-delay command line option has no effect\n");
 	return 1;
 }
 __setup("smt-snooze-delay=", setup_smt_snooze_delay);
@@ -703,12 +695,16 @@ static struct device_attribute pa6t_attrs[] = {
 #endif /* HAS_PPC_PMC_PA6T */
 #endif /* HAS_PPC_PMC_CLASSIC */
 
-static void register_cpu_online(unsigned int cpu)
+static int register_cpu_online(unsigned int cpu)
 {
 	struct cpu *c = &per_cpu(cpu_devices, cpu);
 	struct device *s = &c->dev;
 	struct device_attribute *attrs, *pmc_attrs;
 	int i, nattrs;
+
+	/* For cpus present at boot a reference was already grabbed in register_cpu() */
+	if (!s->of_node)
+		s->of_node = of_get_cpu_node(cpu, NULL);
 
 #ifdef CONFIG_PPC64
 	if (cpu_has_feature(CPU_FTR_SMT))
@@ -782,10 +778,11 @@ static void register_cpu_online(unsigned int cpu)
 	}
 #endif
 	cacheinfo_cpu_online(cpu);
+	return 0;
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
-static void unregister_cpu_online(unsigned int cpu)
+static int unregister_cpu_online(unsigned int cpu)
 {
 	struct cpu *c = &per_cpu(cpu_devices, cpu);
 	struct device *s = &c->dev;
@@ -863,7 +860,13 @@ static void unregister_cpu_online(unsigned int cpu)
 	}
 #endif
 	cacheinfo_cpu_offline(cpu);
+	of_node_put(s->of_node);
+	s->of_node = NULL;
+	return 0;
 }
+#else /* !CONFIG_HOTPLUG_CPU */
+#define unregister_cpu_online NULL
+#endif
 
 #ifdef CONFIG_ARCH_CPU_PROBE_RELEASE
 ssize_t arch_cpu_probe(const char *buf, size_t count)
@@ -882,32 +885,6 @@ ssize_t arch_cpu_release(const char *buf, size_t count)
 	return -EINVAL;
 }
 #endif /* CONFIG_ARCH_CPU_PROBE_RELEASE */
-
-#endif /* CONFIG_HOTPLUG_CPU */
-
-static int sysfs_cpu_notify(struct notifier_block *self,
-				      unsigned long action, void *hcpu)
-{
-	unsigned int cpu = (unsigned int)(long)hcpu;
-
-	switch (action) {
-	case CPU_ONLINE:
-	case CPU_ONLINE_FROZEN:
-		register_cpu_online(cpu);
-		break;
-#ifdef CONFIG_HOTPLUG_CPU
-	case CPU_DEAD:
-	case CPU_DEAD_FROZEN:
-		unregister_cpu_online(cpu);
-		break;
-#endif
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block sysfs_cpu_nb = {
-	.notifier_call	= sysfs_cpu_notify,
-};
 
 static DEFINE_MUTEX(cpu_mutex);
 
@@ -1023,11 +1000,9 @@ static DEVICE_ATTR(physical_id, 0444, show_physical_id, NULL);
 
 static int __init topology_init(void)
 {
-	int cpu;
+	int cpu, r;
 
 	register_nodes();
-
-	cpu_notifier_register_begin();
 
 	for_each_possible_cpu(cpu) {
 		struct cpu *c = &per_cpu(cpu_devices, cpu);
@@ -1047,15 +1022,10 @@ static int __init topology_init(void)
 
 			device_create_file(&c->dev, &dev_attr_physical_id);
 		}
-
-		if (cpu_online(cpu))
-			register_cpu_online(cpu);
 	}
-
-	__register_cpu_notifier(&sysfs_cpu_nb);
-
-	cpu_notifier_register_done();
-
+	r = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "powerpc/topology:online",
+			      register_cpu_online, unregister_cpu_online);
+	WARN_ON(r < 0);
 #ifdef CONFIG_PPC64
 	sysfs_create_dscr_default();
 #endif /* CONFIG_PPC64 */

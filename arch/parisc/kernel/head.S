@@ -22,7 +22,7 @@
 #include <linux/linkage.h>
 #include <linux/init.h>
 
-	.level	LEVEL
+	.level	PA_ASM_LEVEL
 
 	__INITDATA
 ENTRY(boot_args)
@@ -128,6 +128,15 @@ $pgt_fill_loop:
 
 	/* And the stack pointer too */
 	ldo             THREAD_SZ_ALGN(%r6),%sp
+
+#if defined(CONFIG_64BIT) && defined(CONFIG_FUNCTION_TRACER)
+	.import _mcount,data
+	/* initialize mcount FPTR */
+	/* Get the global data pointer */
+	loadgp
+	load32		PA(_mcount), %r10
+	std		%dp,0x18(%r10)
+#endif
 
 #ifdef CONFIG_SMP
 	/* Set the smp rendezvous address into page zero.
@@ -245,7 +254,7 @@ stext_pdc_ret:
 	ldo		R%PA(fault_vector_11)(%r10),%r10
 
 $is_pa20:
-	.level		LEVEL /* restore 1.1 || 2.0w */
+	.level		PA_ASM_LEVEL /* restore 1.1 || 2.0w */
 #endif /*!CONFIG_64BIT*/
 	load32		PA(fault_vector_20),%r10
 

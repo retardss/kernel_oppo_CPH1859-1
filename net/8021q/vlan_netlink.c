@@ -35,10 +35,12 @@ static inline int vlan_validate_qos_map(struct nlattr *attr)
 {
 	if (!attr)
 		return 0;
-	return nla_validate_nested(attr, IFLA_VLAN_QOS_MAX, vlan_map_policy);
+	return nla_validate_nested(attr, IFLA_VLAN_QOS_MAX, vlan_map_policy,
+				   NULL);
 }
 
-static int vlan_validate(struct nlattr *tb[], struct nlattr *data[])
+static int vlan_validate(struct nlattr *tb[], struct nlattr *data[],
+			 struct netlink_ext_ack *extack)
 {
 	struct ifla_vlan_flags *flags;
 	u16 id;
@@ -86,17 +88,20 @@ static int vlan_validate(struct nlattr *tb[], struct nlattr *data[])
 	return 0;
 }
 
-static int vlan_changelink(struct net_device *dev,
-			   struct nlattr *tb[], struct nlattr *data[])
+static int vlan_changelink(struct net_device *dev, struct nlattr *tb[],
+			   struct nlattr *data[],
+			   struct netlink_ext_ack *extack)
 {
 	struct ifla_vlan_flags *flags;
 	struct ifla_vlan_qos_mapping *m;
 	struct nlattr *attr;
-	int rem;
+	int rem, err;
 
 	if (data[IFLA_VLAN_FLAGS]) {
 		flags = nla_data(data[IFLA_VLAN_FLAGS]);
-		vlan_dev_change_flags(dev, flags->flags, flags->mask);
+		err = vlan_dev_change_flags(dev, flags->flags, flags->mask);
+		if (err)
+			return err;
 	}
 	if (data[IFLA_VLAN_INGRESS_QOS]) {
 		nla_for_each_nested(attr, data[IFLA_VLAN_INGRESS_QOS], rem) {
@@ -107,17 +112,21 @@ static int vlan_changelink(struct net_device *dev,
 	if (data[IFLA_VLAN_EGRESS_QOS]) {
 		nla_for_each_nested(attr, data[IFLA_VLAN_EGRESS_QOS], rem) {
 			m = nla_data(attr);
-			vlan_dev_set_egress_priority(dev, m->from, m->to);
+			err = vlan_dev_set_egress_priority(dev, m->from, m->to);
+			if (err)
+				return err;
 		}
 	}
 	return 0;
 }
 
 static int vlan_newlink(struct net *src_net, struct net_device *dev,
-			struct nlattr *tb[], struct nlattr *data[])
+			struct nlattr *tb[], struct nlattr *data[],
+			struct netlink_ext_ack *extack)
 {
 	struct vlan_dev_priv *vlan = vlan_dev_priv(dev);
 	struct net_device *real_dev;
+	unsigned int max_mtu;
 	__be16 proto;
 	int err;
 
@@ -144,16 +153,19 @@ static int vlan_newlink(struct net *src_net, struct net_device *dev,
 	if (err < 0)
 		return err;
 
+	max_mtu = netif_reduces_vlan_mtu(real_dev) ? real_dev->mtu - VLAN_HLEN :
+						     real_dev->mtu;
 	if (!tb[IFLA_MTU])
-		dev->mtu = real_dev->mtu;
-	else if (dev->mtu > real_dev->mtu)
+		dev->mtu = max_mtu;
+	else if (dev->mtu > max_mtu)
 		return -EINVAL;
 
-	err = vlan_changelink(dev, tb, data);
-	if (err < 0)
-		return err;
-
-	return register_vlan_dev(dev);
+	err = vlan_changelink(dev, tb, data, extack);
+	if (!err)
+		err = register_vlan_dev(dev);
+	if (err)
+		vlan_dev_uninit(dev);
+	return err;
 }
 
 static inline size_t vlan_qos_map_size(unsigned int n)

@@ -228,15 +228,15 @@ static void ppp_tx_cp(struct net_device *dev, u16 pid, u8 code,
 	}
 	skb_reserve(skb, sizeof(struct hdlc_header));
 
-	cp = (struct cp_header *)skb_put(skb, sizeof(struct cp_header));
+	cp = skb_put(skb, sizeof(struct cp_header));
 	cp->code = code;
 	cp->id = id;
 	cp->len = htons(sizeof(struct cp_header) + magic_len + len);
 
 	if (magic_len)
-		memcpy(skb_put(skb, magic_len), &magic, magic_len);
+		skb_put_data(skb, &magic, magic_len);
 	if (len)
-		memcpy(skb_put(skb, len), data, len);
+		skb_put_data(skb, data, len);
 
 #if DEBUG_CP
 	BUG_ON(code >= CP_CODES);
@@ -254,6 +254,7 @@ static void ppp_tx_cp(struct net_device *dev, u16 pid, u8 code,
 
 	skb->priority = TC_PRIO_CONTROL;
 	skb->dev = dev;
+	skb->protocol = htons(ETH_P_HDLC);
 	skb_reset_network_header(skb);
 	skb_queue_tail(&tx_queue, skb);
 }
@@ -386,11 +387,8 @@ static void ppp_cp_parse_cr(struct net_device *dev, u16 pid, u8 id,
 	}
 
 	for (opt = data; len; len -= opt[1], opt += opt[1]) {
-		if (len < 2 || len < opt[1]) {
-			dev->stats.rx_errors++;
-			kfree(out);
-			return; /* bad packet, drop silently */
-		}
+		if (len < 2 || opt[1] < 2 || len < opt[1])
+			goto err_out;
 
 		if (pid == PID_LCP)
 			switch (opt[0]) {
@@ -398,6 +396,8 @@ static void ppp_cp_parse_cr(struct net_device *dev, u16 pid, u8 id,
 				continue; /* MRU always OK and > 1500 bytes? */
 
 			case LCP_OPTION_ACCM: /* async control character map */
+				if (opt[1] < sizeof(valid_accm))
+					goto err_out;
 				if (!memcmp(opt, valid_accm,
 					    sizeof(valid_accm)))
 					continue;
@@ -409,6 +409,8 @@ static void ppp_cp_parse_cr(struct net_device *dev, u16 pid, u8 id,
 				}
 				break;
 			case LCP_OPTION_MAGIC:
+				if (len < 6)
+					goto err_out;
 				if (opt[1] != 6 || (!opt[2] && !opt[3] &&
 						    !opt[4] && !opt[5]))
 					break; /* reject invalid magic number */
@@ -426,6 +428,11 @@ static void ppp_cp_parse_cr(struct net_device *dev, u16 pid, u8 id,
 	else
 		ppp_cp_event(dev, pid, RCR_GOOD, CP_CONF_ACK, id, req_len, data);
 
+	kfree(out);
+	return;
+
+err_out:
+	dev->stats.rx_errors++;
 	kfree(out);
 }
 
@@ -448,7 +455,7 @@ static int ppp_rx(struct sk_buff *skb)
 	/* Check HDLC header */
 	if (skb->len < sizeof(struct hdlc_header))
 		goto rx_error;
-	cp = (struct cp_header*)skb_pull(skb, sizeof(struct hdlc_header));
+	cp = skb_pull(skb, sizeof(struct hdlc_header));
 	if (hdr->address != HDLC_ADDR_ALLSTATIONS ||
 	    hdr->control != HDLC_CTRL_UI)
 		goto rx_error;
@@ -690,6 +697,7 @@ static int ppp_ioctl(struct net_device *dev, struct ifreq *ifr)
 		dev->hard_header_len = sizeof(struct hdlc_header);
 		dev->header_ops = &ppp_header_ops;
 		dev->type = ARPHRD_PPP;
+		call_netdevice_notifiers(NETDEV_POST_TYPE_CHANGE, dev);
 		netif_dormant_on(dev);
 		return 0;
 	}

@@ -17,6 +17,7 @@
 #include <asm/simd.h>
 #include <crypto/algapi.h>
 #include <crypto/gf128mul.h>
+#include <crypto/internal/skcipher.h>
 #include <crypto/speck.h>
 #include <crypto/xts.h>
 #include <linux/kernel.h>
@@ -46,19 +47,17 @@ typedef void (*speck128_xts_crypt_many_t)(const u64 *, int, void *,
 					  const void *, unsigned int, void *);
 
 static __always_inline int
-__speck128_xts_crypt(struct blkcipher_desc *desc, struct scatterlist *dst,
-		     struct scatterlist *src, unsigned int nbytes,
+__speck128_xts_crypt(struct skcipher_request *req,
 		     speck128_crypt_one_t crypt_one,
 		     speck128_xts_crypt_many_t crypt_many)
 {
-	struct crypto_blkcipher *tfm = desc->tfm;
-	const struct speck128_xts_tfm_ctx *ctx = crypto_blkcipher_ctx(tfm);
-	struct blkcipher_walk walk;
+	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+	const struct speck128_xts_tfm_ctx *ctx = crypto_skcipher_ctx(tfm);
+	struct skcipher_walk walk;
 	le128 tweak;
 	int err;
 
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	err = blkcipher_walk_virt_block(desc, &walk, SPECK_NEON_CHUNK_SIZE);
+	err = skcipher_walk_virt(&walk, req, true);
 
 	crypto_speck128_encrypt(&ctx->tweak_key, (u8 *)&tweak, walk.iv);
 
@@ -86,46 +85,39 @@ __speck128_xts_crypt(struct blkcipher_desc *desc, struct scatterlist *dst,
 			le128_xor((le128 *)dst, (const le128 *)src, &tweak);
 			(*crypt_one)(&ctx->main_key, dst, dst);
 			le128_xor((le128 *)dst, (const le128 *)dst, &tweak);
-			gf128mul_x_ble((be128 *)&tweak, (const be128 *)&tweak);
+			gf128mul_x_ble(&tweak, &tweak);
 
 			dst += sizeof(tweak);
 			src += sizeof(tweak);
 			nbytes -= sizeof(tweak);
 		}
-		err = blkcipher_walk_done(desc, &walk, nbytes);
+		err = skcipher_walk_done(&walk, nbytes);
 	}
 
 	return err;
 }
 
-static int speck128_xts_encrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src,
-				unsigned int nbytes)
+static int speck128_xts_encrypt(struct skcipher_request *req)
 {
-	return __speck128_xts_crypt(desc, dst, src, nbytes,
-				    crypto_speck128_encrypt,
+	return __speck128_xts_crypt(req, crypto_speck128_encrypt,
 				    speck128_xts_encrypt_neon);
 }
 
-static int speck128_xts_decrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src,
-				unsigned int nbytes)
+static int speck128_xts_decrypt(struct skcipher_request *req)
 {
-	return __speck128_xts_crypt(desc, dst, src, nbytes,
-				    crypto_speck128_decrypt,
+	return __speck128_xts_crypt(req, crypto_speck128_decrypt,
 				    speck128_xts_decrypt_neon);
 }
 
-static int speck128_xts_setkey(struct crypto_tfm *tfm, const u8 *key,
+static int speck128_xts_setkey(struct crypto_skcipher *tfm, const u8 *key,
 			       unsigned int keylen)
 {
-	struct speck128_xts_tfm_ctx *ctx = crypto_tfm_ctx(tfm);
+	struct speck128_xts_tfm_ctx *ctx = crypto_skcipher_ctx(tfm);
 	int err;
 
-	if (keylen % 2)
-		return -EINVAL;
+	err = xts_verify_key(tfm, key, keylen);
+	if (err)
+		return err;
 
 	keylen /= 2;
 
@@ -157,19 +149,16 @@ typedef void (*speck64_xts_crypt_many_t)(const u32 *, int, void *,
 					 const void *, unsigned int, void *);
 
 static __always_inline int
-__speck64_xts_crypt(struct blkcipher_desc *desc, struct scatterlist *dst,
-		    struct scatterlist *src, unsigned int nbytes,
-		    speck64_crypt_one_t crypt_one,
+__speck64_xts_crypt(struct skcipher_request *req, speck64_crypt_one_t crypt_one,
 		    speck64_xts_crypt_many_t crypt_many)
 {
-	struct crypto_blkcipher *tfm = desc->tfm;
-	const struct speck64_xts_tfm_ctx *ctx = crypto_blkcipher_ctx(tfm);
-	struct blkcipher_walk walk;
+	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+	const struct speck64_xts_tfm_ctx *ctx = crypto_skcipher_ctx(tfm);
+	struct skcipher_walk walk;
 	__le64 tweak;
 	int err;
 
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	err = blkcipher_walk_virt_block(desc, &walk, SPECK_NEON_CHUNK_SIZE);
+	err = skcipher_walk_virt(&walk, req, true);
 
 	crypto_speck64_encrypt(&ctx->tweak_key, (u8 *)&tweak, walk.iv);
 
@@ -204,38 +193,33 @@ __speck64_xts_crypt(struct blkcipher_desc *desc, struct scatterlist *dst,
 			src += sizeof(tweak);
 			nbytes -= sizeof(tweak);
 		}
-		err = blkcipher_walk_done(desc, &walk, nbytes);
+		err = skcipher_walk_done(&walk, nbytes);
 	}
 
 	return err;
 }
 
-static int speck64_xts_encrypt(struct blkcipher_desc *desc,
-			       struct scatterlist *dst, struct scatterlist *src,
-			       unsigned int nbytes)
+static int speck64_xts_encrypt(struct skcipher_request *req)
 {
-	return __speck64_xts_crypt(desc, dst, src, nbytes,
-				   crypto_speck64_encrypt,
+	return __speck64_xts_crypt(req, crypto_speck64_encrypt,
 				   speck64_xts_encrypt_neon);
 }
 
-static int speck64_xts_decrypt(struct blkcipher_desc *desc,
-			       struct scatterlist *dst, struct scatterlist *src,
-			       unsigned int nbytes)
+static int speck64_xts_decrypt(struct skcipher_request *req)
 {
-	return __speck64_xts_crypt(desc, dst, src, nbytes,
-				   crypto_speck64_decrypt,
+	return __speck64_xts_crypt(req, crypto_speck64_decrypt,
 				   speck64_xts_decrypt_neon);
 }
 
-static int speck64_xts_setkey(struct crypto_tfm *tfm, const u8 *key,
+static int speck64_xts_setkey(struct crypto_skcipher *tfm, const u8 *key,
 			      unsigned int keylen)
 {
-	struct speck64_xts_tfm_ctx *ctx = crypto_tfm_ctx(tfm);
+	struct speck64_xts_tfm_ctx *ctx = crypto_skcipher_ctx(tfm);
 	int err;
 
-	if (keylen % 2)
-		return -EINVAL;
+	err = xts_verify_key(tfm, key, keylen);
+	if (err)
+		return err;
 
 	keylen /= 2;
 
@@ -246,47 +230,37 @@ static int speck64_xts_setkey(struct crypto_tfm *tfm, const u8 *key,
 	return crypto_speck64_setkey(&ctx->tweak_key, key + keylen, keylen);
 }
 
-static struct crypto_alg speck_algs[] = {
+static struct skcipher_alg speck_algs[] = {
 	{
-		.cra_name		= "xts(speck128)",
-		.cra_driver_name	= "xts-speck128-neon",
-		.cra_priority		= 300,
-		.cra_flags		= CRYPTO_ALG_TYPE_BLKCIPHER,
-		.cra_blocksize		= SPECK128_BLOCK_SIZE,
-		.cra_type		= &crypto_blkcipher_type,
-		.cra_ctxsize		= sizeof(struct speck128_xts_tfm_ctx),
-		.cra_alignmask		= 7,
-		.cra_module		= THIS_MODULE,
-		.cra_u = {
-			.blkcipher = {
-				.min_keysize		= 2 * SPECK128_128_KEY_SIZE,
-				.max_keysize		= 2 * SPECK128_256_KEY_SIZE,
-				.ivsize			= SPECK128_BLOCK_SIZE,
-				.setkey			= speck128_xts_setkey,
-				.encrypt		= speck128_xts_encrypt,
-				.decrypt		= speck128_xts_decrypt,
-			}
-		}
+		.base.cra_name		= "xts(speck128)",
+		.base.cra_driver_name	= "xts-speck128-neon",
+		.base.cra_priority	= 300,
+		.base.cra_blocksize	= SPECK128_BLOCK_SIZE,
+		.base.cra_ctxsize	= sizeof(struct speck128_xts_tfm_ctx),
+		.base.cra_alignmask	= 7,
+		.base.cra_module	= THIS_MODULE,
+		.min_keysize		= 2 * SPECK128_128_KEY_SIZE,
+		.max_keysize		= 2 * SPECK128_256_KEY_SIZE,
+		.ivsize			= SPECK128_BLOCK_SIZE,
+		.walksize		= SPECK_NEON_CHUNK_SIZE,
+		.setkey			= speck128_xts_setkey,
+		.encrypt		= speck128_xts_encrypt,
+		.decrypt		= speck128_xts_decrypt,
 	}, {
-		.cra_name		= "xts(speck64)",
-		.cra_driver_name	= "xts-speck64-neon",
-		.cra_priority		= 300,
-		.cra_flags		= CRYPTO_ALG_TYPE_BLKCIPHER,
-		.cra_blocksize		= SPECK64_BLOCK_SIZE,
-		.cra_type		= &crypto_blkcipher_type,
-		.cra_ctxsize		= sizeof(struct speck64_xts_tfm_ctx),
-		.cra_alignmask		= 7,
-		.cra_module		= THIS_MODULE,
-		.cra_u = {
-			.blkcipher = {
-				.min_keysize		= 2 * SPECK64_96_KEY_SIZE,
-				.max_keysize		= 2 * SPECK64_128_KEY_SIZE,
-				.ivsize			= SPECK64_BLOCK_SIZE,
-				.setkey			= speck64_xts_setkey,
-				.encrypt		= speck64_xts_encrypt,
-				.decrypt		= speck64_xts_decrypt,
-			}
-		}
+		.base.cra_name		= "xts(speck64)",
+		.base.cra_driver_name	= "xts-speck64-neon",
+		.base.cra_priority	= 300,
+		.base.cra_blocksize	= SPECK64_BLOCK_SIZE,
+		.base.cra_ctxsize	= sizeof(struct speck64_xts_tfm_ctx),
+		.base.cra_alignmask	= 7,
+		.base.cra_module	= THIS_MODULE,
+		.min_keysize		= 2 * SPECK64_96_KEY_SIZE,
+		.max_keysize		= 2 * SPECK64_128_KEY_SIZE,
+		.ivsize			= SPECK64_BLOCK_SIZE,
+		.walksize		= SPECK_NEON_CHUNK_SIZE,
+		.setkey			= speck64_xts_setkey,
+		.encrypt		= speck64_xts_encrypt,
+		.decrypt		= speck64_xts_decrypt,
 	}
 };
 
@@ -294,12 +268,12 @@ static int __init speck_neon_module_init(void)
 {
 	if (!(elf_hwcap & HWCAP_NEON))
 		return -ENODEV;
-	return crypto_register_algs(speck_algs, ARRAY_SIZE(speck_algs));
+	return crypto_register_skciphers(speck_algs, ARRAY_SIZE(speck_algs));
 }
 
 static void __exit speck_neon_module_exit(void)
 {
-	crypto_unregister_algs(speck_algs, ARRAY_SIZE(speck_algs));
+	crypto_unregister_skciphers(speck_algs, ARRAY_SIZE(speck_algs));
 }
 
 module_init(speck_neon_module_init);

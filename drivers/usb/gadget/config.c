@@ -93,7 +93,7 @@ int usb_gadget_config_buf(
 	*cp = *config;
 
 	/* then interface/endpoint/class/vendor/... */
-	len = usb_descriptor_fillbuf(USB_DT_CONFIG_SIZE + (u8*)buf,
+	len = usb_descriptor_fillbuf(USB_DT_CONFIG_SIZE + (u8 *)buf,
 			length - USB_DT_CONFIG_SIZE, desc);
 	if (len < 0)
 		return len;
@@ -163,7 +163,8 @@ EXPORT_SYMBOL_GPL(usb_copy_descriptors);
 int usb_assign_descriptors(struct usb_function *f,
 		struct usb_descriptor_header **fs,
 		struct usb_descriptor_header **hs,
-		struct usb_descriptor_header **ss)
+		struct usb_descriptor_header **ss,
+		struct usb_descriptor_header **ssp)
 {
 	struct usb_gadget *g = f->config->cdev->gadget;
 
@@ -182,6 +183,11 @@ int usb_assign_descriptors(struct usb_function *f,
 		if (!f->ss_descriptors)
 			goto err;
 	}
+	if (ssp && gadget_is_superspeed_plus(g)) {
+		f->ssp_descriptors = usb_copy_descriptors(ssp);
+		if (!f->ssp_descriptors)
+			goto err;
+	}
 	return 0;
 err:
 	usb_free_all_descriptors(f);
@@ -192,8 +198,13 @@ EXPORT_SYMBOL_GPL(usb_assign_descriptors);
 void usb_free_all_descriptors(struct usb_function *f)
 {
 	usb_free_descriptors(f->fs_descriptors);
+	f->fs_descriptors = NULL;
 	usb_free_descriptors(f->hs_descriptors);
+	f->hs_descriptors = NULL;
 	usb_free_descriptors(f->ss_descriptors);
+	f->ss_descriptors = NULL;
+	usb_free_descriptors(f->ssp_descriptors);
+	f->ssp_descriptors = NULL;
 }
 EXPORT_SYMBOL_GPL(usb_free_all_descriptors);
 

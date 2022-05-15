@@ -17,8 +17,13 @@
  */
 #include <linux/kernel.h>
 #include <linux/export.h>
+#include <linux/ftrace.h>
+#include <linux/kprobes.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task_stack.h>
 #include <linux/stacktrace.h>
+#include <linux/kasan.h>
 
 #include <asm/irq.h>
 #include <asm/stack_pointer.h>
@@ -39,7 +44,6 @@
  */
 int notrace unwind_frame(struct task_struct *tsk, struct stackframe *frame)
 {
-	unsigned long high, low;
 	unsigned long fp = frame->fp;
 	unsigned long irq_stack_ptr;
 
@@ -55,19 +59,46 @@ int notrace unwind_frame(struct task_struct *tsk, struct stackframe *frame)
 	else
 		irq_stack_ptr = 0;
 
-	low  = frame->sp;
-	/* irq stacks are not THREAD_SIZE aligned */
-	if (on_irq_stack(frame->sp, raw_smp_processor_id()))
-		high = irq_stack_ptr;
-	else
-		high = ALIGN(low, THREAD_SIZE) - 0x20;
-
-	if (fp < low || fp > high || fp & 0xf)
+	if (fp & 0xf)
 		return -EINVAL;
 
-	frame->sp = fp + 0x10;
-	frame->fp = *(unsigned long *)(fp);
-	frame->pc = *(unsigned long *)(fp + 8);
+	if (!tsk)
+		tsk = current;
+
+	if (!on_accessible_stack(tsk, fp))
+		return -EINVAL;
+
+	kasan_disable_current();
+	frame->fp = READ_ONCE_NOCHECK(*(unsigned long *)(fp));
+	frame->pc = READ_ONCE_NOCHECK(*(unsigned long *)(fp + 8));
+	kasan_enable_current();
+
+#ifdef CONFIG_FUNCTION_GRAPH_TRACER
+	if (tsk->ret_stack &&
+			(frame->pc == (unsigned long)return_to_handler)) {
+		if (WARN_ON_ONCE(frame->graph == -1))
+			return -EINVAL;
+		if (frame->graph < -1)
+			frame->graph += FTRACE_NOTRACE_DEPTH;
+
+		/*
+		 * This is a case where function graph tracer has
+		 * modified a return address (LR) in a stack frame
+		 * to hook a function return.
+		 * So replace it to an original value.
+		 */
+		frame->pc = tsk->ret_stack[frame->graph--].ret;
+	}
+#endif /* CONFIG_FUNCTION_GRAPH_TRACER */
+
+	/*
+	 * Frames created upon entry from EL0 have NULL FP and PC values, so
+	 * don't bother reporting these. Frames created by __noreturn functions
+	 * might have a valid FP even if PC is bogus, so only terminate where
+	 * both are NULL.
+	 */
+	if (!frame->fp && !frame->pc)
+		return -EINVAL;
 
 	/*
 	 * Check whether we are going to walk through from interrupt stack
@@ -101,6 +132,7 @@ int notrace unwind_frame(struct task_struct *tsk, struct stackframe *frame)
 
 	return 0;
 }
+NOKPROBE_SYMBOL(unwind_frame);
 
 void notrace walk_stackframe(struct task_struct *tsk, struct stackframe *frame,
 		     int (*fn)(struct stackframe *, void *), void *data)
@@ -115,6 +147,7 @@ void notrace walk_stackframe(struct task_struct *tsk, struct stackframe *frame,
 			break;
 	}
 }
+NOKPROBE_SYMBOL(walk_stackframe);
 
 #ifdef CONFIG_STACKTRACE
 struct stack_trace_data {
@@ -141,7 +174,7 @@ static int save_trace(struct stackframe *frame, void *d)
 	return trace->nr_entries >= trace->max_entries;
 }
 
-void save_stack_trace_tsk(struct task_struct *tsk, struct stack_trace *trace)
+void save_stack_trace_regs(struct pt_regs *regs, struct stack_trace *trace)
 {
 	struct stack_trace_data data;
 	struct stackframe frame;
@@ -151,18 +184,46 @@ void save_stack_trace_tsk(struct task_struct *tsk, struct stack_trace *trace)
 
 	data.trace = trace;
 	data.skip = trace->skip;
+	data.no_sched_functions = 0;
+
+	frame.fp = regs->regs[29];
+	frame.pc = regs->pc;
+#ifdef CONFIG_FUNCTION_GRAPH_TRACER
+	frame.graph = current->curr_ret_stack;
+#endif
+
+	walk_stackframe(current, &frame, save_trace, &data);
+	if (trace->nr_entries < trace->max_entries)
+		trace->entries[trace->nr_entries++] = ULONG_MAX;
+
+	put_task_stack(tsk);
+}
+
+static noinline void __save_stack_trace(struct task_struct *tsk,
+	struct stack_trace *trace, unsigned int nosched)
+{
+	struct stack_trace_data data;
+	struct stackframe frame;
+
+	if (!try_get_task_stack(tsk))
+		return;
+
+	data.trace = trace;
+	data.skip = trace->skip;
+	data.no_sched_functions = nosched;
 
 	if (tsk != current) {
-		data.no_sched_functions = 1;
 		frame.fp = thread_saved_fp(tsk);
-		frame.sp = thread_saved_sp(tsk);
 		frame.pc = thread_saved_pc(tsk);
 	} else {
-		data.no_sched_functions = 0;
+		/* We don't want this function nor the caller */
+		data.skip += 2;
 		frame.fp = (unsigned long)__builtin_frame_address(0);
-		frame.sp = current_stack_pointer;
-		frame.pc = (unsigned long)save_stack_trace_tsk;
+		frame.pc = (unsigned long)__save_stack_trace;
 	}
+#ifdef CONFIG_FUNCTION_GRAPH_TRACER
+	frame.graph = tsk->curr_ret_stack;
+#endif
 
 	walk_stackframe(tsk, &frame, save_trace, &data);
 	if (trace->nr_entries < trace->max_entries)
@@ -170,10 +231,17 @@ void save_stack_trace_tsk(struct task_struct *tsk, struct stack_trace *trace)
 
 	put_task_stack(tsk);
 }
+EXPORT_SYMBOL_GPL(save_stack_trace_tsk);
+
+void save_stack_trace_tsk(struct task_struct *tsk, struct stack_trace *trace)
+{
+	__save_stack_trace(tsk, trace, 1);
+}
 
 void save_stack_trace(struct stack_trace *trace)
 {
-	save_stack_trace_tsk(current, trace);
+	__save_stack_trace(current, trace, 0);
 }
+
 EXPORT_SYMBOL_GPL(save_stack_trace);
 #endif

@@ -44,9 +44,11 @@ xfs_sysfs_init(
 	struct xfs_kobj		*parent_kobj,
 	const char		*name)
 {
+	struct kobject		*parent;
+
+	parent = parent_kobj ? &parent_kobj->kobject : NULL;
 	init_completion(&kobj->complete);
-	return kobject_init_and_add(&kobj->kobject, ktype,
-				    &parent_kobj->kobject, "%s", name);
+	return kobject_init_and_add(&kobj->kobject, ktype, parent, "%s", name);
 }
 
 static inline void
@@ -57,5 +59,8 @@ xfs_sysfs_del(
 	kobject_put(&kobj->kobject);
 	wait_for_completion(&kobj->complete);
 }
+
+int	xfs_error_sysfs_init(struct xfs_mount *mp);
+void	xfs_error_sysfs_del(struct xfs_mount *mp);
 
 #endif	/* __XFS_SYSFS_H__ */

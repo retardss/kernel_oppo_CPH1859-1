@@ -170,7 +170,7 @@ SOC_DOUBLE("Polarity Invert Switch", WM8737_ADC_CONTROL, 5, 6, 1, 0),
 SOC_SINGLE("3D Switch", WM8737_3D_ENHANCE, 0, 1, 0),
 SOC_SINGLE("3D Depth", WM8737_3D_ENHANCE, 1, 15, 0),
 SOC_ENUM("3D Low Cut-off", low_3d),
-SOC_ENUM("3D High Cut-off", low_3d),
+SOC_ENUM("3D High Cut-off", high_3d),
 SOC_SINGLE_TLV("3D ADC Volume", WM8737_3D_ENHANCE, 7, 1, 1, adc_tlv),
 
 SOC_SINGLE("Noise Gate Switch", WM8737_NOISE_GATE, 0, 1, 0),
@@ -573,17 +573,19 @@ err_get:
 	return ret;
 }
 
-static struct snd_soc_codec_driver soc_codec_dev_wm8737 = {
+static const struct snd_soc_codec_driver soc_codec_dev_wm8737 = {
 	.probe		= wm8737_probe,
 	.set_bias_level = wm8737_set_bias_level,
 	.suspend_bias_off = true,
 
-	.controls = wm8737_snd_controls,
-	.num_controls = ARRAY_SIZE(wm8737_snd_controls),
-	.dapm_widgets = wm8737_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(wm8737_dapm_widgets),
-	.dapm_routes = intercon,
-	.num_dapm_routes = ARRAY_SIZE(intercon),
+	.component_driver = {
+		.controls		= wm8737_snd_controls,
+		.num_controls		= ARRAY_SIZE(wm8737_snd_controls),
+		.dapm_widgets		= wm8737_dapm_widgets,
+		.num_dapm_widgets	= ARRAY_SIZE(wm8737_dapm_widgets),
+		.dapm_routes		= intercon,
+		.num_dapm_routes	= ARRAY_SIZE(intercon),
+	},
 };
 
 static const struct of_device_id wm8737_of_match[] = {

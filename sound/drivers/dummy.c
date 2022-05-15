@@ -355,7 +355,7 @@ static void dummy_systimer_free(struct snd_pcm_substream *substream)
 	kfree(substream->runtime->private_data);
 }
 
-static struct dummy_timer_ops dummy_systimer_ops = {
+static const struct dummy_timer_ops dummy_systimer_ops = {
 	.create =	dummy_systimer_create,
 	.free =		dummy_systimer_free,
 	.prepare =	dummy_systimer_prepare,
@@ -482,7 +482,7 @@ static void dummy_hrtimer_free(struct snd_pcm_substream *substream)
 	kfree(dpcm);
 }
 
-static struct dummy_timer_ops dummy_hrtimer_ops = {
+static const struct dummy_timer_ops dummy_hrtimer_ops = {
 	.create =	dummy_hrtimer_create,
 	.free =		dummy_hrtimer_free,
 	.prepare =	dummy_hrtimer_prepare,
@@ -520,7 +520,7 @@ static snd_pcm_uframes_t dummy_pcm_pointer(struct snd_pcm_substream *substream)
 	return get_dummy_ops(substream)->pointer(substream);
 }
 
-static struct snd_pcm_hardware dummy_pcm_hardware = {
+static const struct snd_pcm_hardware dummy_pcm_hardware = {
 	.info =			(SNDRV_PCM_INFO_MMAP |
 				 SNDRV_PCM_INFO_INTERLEAVED |
 				 SNDRV_PCM_INFO_RESUME |
@@ -644,15 +644,22 @@ static int alloc_fake_buffer(void)
 }
 
 static int dummy_pcm_copy(struct snd_pcm_substream *substream,
-			  int channel, snd_pcm_uframes_t pos,
-			  void __user *dst, snd_pcm_uframes_t count)
+			  int channel, unsigned long pos,
+			  void __user *dst, unsigned long bytes)
+{
+	return 0; /* do nothing */
+}
+
+static int dummy_pcm_copy_kernel(struct snd_pcm_substream *substream,
+				 int channel, unsigned long pos,
+				 void *dst, unsigned long bytes)
 {
 	return 0; /* do nothing */
 }
 
 static int dummy_pcm_silence(struct snd_pcm_substream *substream,
-			     int channel, snd_pcm_uframes_t pos,
-			     snd_pcm_uframes_t count)
+			     int channel, unsigned long pos,
+			     unsigned long bytes)
 {
 	return 0; /* do nothing */
 }
@@ -683,8 +690,9 @@ static struct snd_pcm_ops dummy_pcm_ops_no_buf = {
 	.prepare =	dummy_pcm_prepare,
 	.trigger =	dummy_pcm_trigger,
 	.pointer =	dummy_pcm_pointer,
-	.copy =		dummy_pcm_copy,
-	.silence =	dummy_pcm_silence,
+	.copy_user =	dummy_pcm_copy,
+	.copy_kernel =	dummy_pcm_copy_kernel,
+	.fill_silence =	dummy_pcm_silence,
 	.page =		dummy_pcm_page,
 };
 
@@ -925,7 +933,7 @@ static void print_formats(struct snd_dummy *dummy,
 {
 	int i;
 
-	for (i = 0; i < SNDRV_PCM_FORMAT_LAST; i++) {
+	for (i = 0; i <= SNDRV_PCM_FORMAT_LAST; i++) {
 		if (dummy->pcm_hw.formats & (1ULL << i))
 			snd_iprintf(buffer, " %s", snd_pcm_format_name(i));
 	}

@@ -303,16 +303,19 @@ placeholder:
 	slot_name = make_slot_name(name);
 	if (!slot_name) {
 		err = -ENOMEM;
+		kfree(slot);
 		goto err;
 	}
 
-	err = kobject_init_and_add(&slot->kobj, &pci_slot_ktype, NULL,
-				   "%s", slot_name);
-	if (err)
-		goto err;
-
 	INIT_LIST_HEAD(&slot->list);
 	list_add(&slot->list, &parent->slots);
+
+	err = kobject_init_and_add(&slot->kobj, &pci_slot_ktype, NULL,
+				   "%s", slot_name);
+	if (err) {
+		kobject_put(&slot->kobj);
+		goto err;
+	}
 
 	down_read(&pci_bus_sem);
 	list_for_each_entry(dev, &parent->devices, bus_list)
@@ -328,7 +331,6 @@ out:
 	mutex_unlock(&pci_slot_mutex);
 	return slot;
 err:
-	kfree(slot);
 	slot = ERR_PTR(err);
 	goto out;
 }
@@ -345,7 +347,7 @@ EXPORT_SYMBOL_GPL(pci_create_slot);
 void pci_destroy_slot(struct pci_slot *slot)
 {
 	dev_dbg(&slot->bus->dev, "dev %02x, dec refcount to %d\n",
-		slot->number, atomic_read(&slot->kobj.kref.refcount) - 1);
+		slot->number, kref_read(&slot->kobj.kref) - 1);
 
 	mutex_lock(&pci_slot_mutex);
 	kobject_put(&slot->kobj);

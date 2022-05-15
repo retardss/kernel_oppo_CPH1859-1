@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * The USB Monitor, inspired by Dave Harding's USBMon.
  *
@@ -8,6 +9,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/sched/signal.h>
 #include <linux/types.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
@@ -18,8 +20,9 @@
 #include <linux/mm.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <linux/time64.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "usb_mon.h"
 
@@ -92,8 +95,8 @@ struct mon_bin_hdr {
 	unsigned short busnum;	/* Bus number */
 	char flag_setup;
 	char flag_data;
-	s64 ts_sec;		/* gettimeofday */
-	s32 ts_usec;		/* gettimeofday */
+	s64 ts_sec;		/* getnstimeofday64 */
+	s32 ts_usec;		/* getnstimeofday64 */
 	int status;
 	unsigned int len_urb;	/* Length of data (submitted or actual) */
 	unsigned int len_cap;	/* Delivered length */
@@ -483,7 +486,7 @@ static void mon_bin_event(struct mon_reader_bin *rp, struct urb *urb,
     char ev_type, int status)
 {
 	const struct usb_endpoint_descriptor *epd = &urb->ep->desc;
-	struct timeval ts;
+	struct timespec64 ts;
 	unsigned long flags;
 	unsigned int urb_length;
 	unsigned int offset;
@@ -494,7 +497,7 @@ static void mon_bin_event(struct mon_reader_bin *rp, struct urb *urb,
 	struct mon_bin_hdr *ep;
 	char data_tag = 0;
 
-	do_gettimeofday(&ts);
+	getnstimeofday64(&ts);
 
 	spin_lock_irqsave(&rp->b_lock, flags);
 
@@ -568,7 +571,7 @@ static void mon_bin_event(struct mon_reader_bin *rp, struct urb *urb,
 	ep->busnum = urb->dev->bus->busnum;
 	ep->id = (unsigned long) urb;
 	ep->ts_sec = ts.tv_sec;
-	ep->ts_usec = ts.tv_usec;
+	ep->ts_usec = ts.tv_nsec / NSEC_PER_USEC;
 	ep->status = status;
 	ep->len_urb = urb_length;
 	ep->len_cap = length + lendesc;
@@ -629,12 +632,12 @@ static void mon_bin_complete(void *data, struct urb *urb, int status)
 static void mon_bin_error(void *data, struct urb *urb, int error)
 {
 	struct mon_reader_bin *rp = data;
-	struct timeval ts;
+	struct timespec64 ts;
 	unsigned long flags;
 	unsigned int offset;
 	struct mon_bin_hdr *ep;
 
-	do_gettimeofday(&ts);
+	getnstimeofday64(&ts);
 
 	spin_lock_irqsave(&rp->b_lock, flags);
 
@@ -656,7 +659,7 @@ static void mon_bin_error(void *data, struct urb *urb, int error)
 	ep->busnum = urb->dev->bus->busnum;
 	ep->id = (unsigned long) urb;
 	ep->ts_sec = ts.tv_sec;
-	ep->ts_usec = ts.tv_usec;
+	ep->ts_usec = ts.tv_nsec / NSEC_PER_USEC;
 	ep->status = error;
 
 	ep->flag_setup = '-';
@@ -1035,12 +1038,18 @@ static long mon_bin_ioctl(struct file *file, unsigned int cmd, unsigned long arg
 
 		mutex_lock(&rp->fetch_lock);
 		spin_lock_irqsave(&rp->b_lock, flags);
-		mon_free_buff(rp->b_vec, rp->b_size/CHUNK_SIZE);
-		kfree(rp->b_vec);
-		rp->b_vec  = vec;
-		rp->b_size = size;
-		rp->b_read = rp->b_in = rp->b_out = rp->b_cnt = 0;
-		rp->cnt_lost = 0;
+		if (rp->mmap_active) {
+			mon_free_buff(vec, size/CHUNK_SIZE);
+			kfree(vec);
+			ret = -EBUSY;
+		} else {
+			mon_free_buff(rp->b_vec, rp->b_size/CHUNK_SIZE);
+			kfree(rp->b_vec);
+			rp->b_vec  = vec;
+			rp->b_size = size;
+			rp->b_read = rp->b_in = rp->b_out = rp->b_cnt = 0;
+			rp->cnt_lost = 0;
+		}
 		spin_unlock_irqrestore(&rp->b_lock, flags);
 		mutex_unlock(&rp->fetch_lock);
 		}
@@ -1212,21 +1221,29 @@ mon_bin_poll(struct file *file, struct poll_table_struct *wait)
 static void mon_bin_vma_open(struct vm_area_struct *vma)
 {
 	struct mon_reader_bin *rp = vma->vm_private_data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&rp->b_lock, flags);
 	rp->mmap_active++;
+	spin_unlock_irqrestore(&rp->b_lock, flags);
 }
 
 static void mon_bin_vma_close(struct vm_area_struct *vma)
 {
+	unsigned long flags;
+
 	struct mon_reader_bin *rp = vma->vm_private_data;
+	spin_lock_irqsave(&rp->b_lock, flags);
 	rp->mmap_active--;
+	spin_unlock_irqrestore(&rp->b_lock, flags);
 }
 
 /*
  * Map ring pages to user space.
  */
-static int mon_bin_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static int mon_bin_vma_fault(struct vm_fault *vmf)
 {
-	struct mon_reader_bin *rp = vma->vm_private_data;
+	struct mon_reader_bin *rp = vmf->vma->vm_private_data;
 	unsigned long offset, chunk_idx;
 	struct page *pageptr;
 

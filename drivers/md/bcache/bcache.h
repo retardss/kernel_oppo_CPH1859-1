@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _BCACHE_H
 #define _BCACHE_H
 
@@ -547,6 +548,7 @@ struct cache_set {
 	 */
 	wait_queue_head_t	btree_cache_wait;
 	struct task_struct	*btree_cache_alloc_lock;
+	spinlock_t		btree_cannibalize_lock;
 
 	/*
 	 * When we free a btree node, we increment the gen of the bucket the
@@ -850,10 +852,11 @@ static inline void wake_up_allocators(struct cache_set *c)
 
 /* Forward declarations */
 
-void bch_count_io_errors(struct cache *, int, const char *);
+void bch_count_io_errors(struct cache *, blk_status_t, const char *);
 void bch_bbio_count_io_errors(struct cache_set *, struct bio *,
-			      int, const char *);
-void bch_bbio_endio(struct cache_set *, struct bio *, int, const char *);
+			      blk_status_t, const char *);
+void bch_bbio_endio(struct cache_set *, struct bio *, blk_status_t,
+		const char *);
 void bch_bbio_free(struct bio *, struct cache_set *);
 struct bio *bch_bbio_alloc(struct cache_set *);
 

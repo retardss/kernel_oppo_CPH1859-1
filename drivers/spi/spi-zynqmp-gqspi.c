@@ -360,7 +360,7 @@ static int zynqmp_prepare_transfer_hardware(struct spi_master *master)
 
 	ret = clk_enable(xqspi->refclk);
 	if (ret)
-		goto clk_err;
+		return ret;
 
 	ret = clk_enable(xqspi->pclk);
 	if (ret)
@@ -369,6 +369,7 @@ static int zynqmp_prepare_transfer_hardware(struct spi_master *master)
 	zynqmp_gqspi_write(xqspi, GQSPI_EN_OFST, GQSPI_EN_MASK);
 	return 0;
 clk_err:
+	clk_disable(xqspi->refclk);
 	return ret;
 }
 
@@ -413,9 +414,6 @@ static void zynqmp_qspi_chipselect(struct spi_device *qspi, bool is_high)
 	}
 
 	zynqmp_gqspi_write(xqspi, GQSPI_GEN_FIFO_OFST, genfifoentry);
-
-	/* Dummy generic FIFO entry */
-	zynqmp_gqspi_write(xqspi, GQSPI_GEN_FIFO_OFST, 0x0);
 
 	/* Manually start the generic FIFO command */
 	zynqmp_gqspi_write(xqspi, GQSPI_CONFIG_OFST,
@@ -917,9 +915,7 @@ static int zynqmp_qspi_start_transfer(struct spi_master *master,
  */
 static int __maybe_unused zynqmp_qspi_suspend(struct device *dev)
 {
-	struct platform_device *pdev = container_of(dev,
-						    struct platform_device,
-						    dev);
+	struct platform_device *pdev = to_platform_device(dev);
 	struct spi_master *master = platform_get_drvdata(pdev);
 
 	spi_master_suspend(master);
@@ -940,9 +936,7 @@ static int __maybe_unused zynqmp_qspi_suspend(struct device *dev)
  */
 static int __maybe_unused zynqmp_qspi_resume(struct device *dev)
 {
-	struct platform_device *pdev = container_of(dev,
-						    struct platform_device,
-						    dev);
+	struct platform_device *pdev = to_platform_device(dev);
 	struct spi_master *master = platform_get_drvdata(pdev);
 	struct zynqmp_qspi *xqspi = spi_master_get_devdata(master);
 	int ret = 0;

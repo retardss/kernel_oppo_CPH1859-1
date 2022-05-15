@@ -57,6 +57,13 @@ static int __init rtc_hctosys(void)
 	}
 #endif
 
+#if BITS_PER_LONG == 32
+	if (tv64.tv_sec > INT_MAX) {
+		err = -ERANGE;
+		goto err_read;
+	}
+#endif
+
 	err = do_settimeofday64(&tv64);
 
 	dev_info(rtc->dev.parent,

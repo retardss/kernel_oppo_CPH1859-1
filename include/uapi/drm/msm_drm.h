@@ -2,24 +2,35 @@
  * Copyright (C) 2013 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #ifndef __MSM_DRM_H__
 #define __MSM_DRM_H__
 
-#include <stddef.h>
-#include <drm/drm.h>
+#include "drm.h"
+#include "sde_drm.h"
+
+#if defined(__cplusplus)
+extern "C" {
+#endif
 
 /* Please note that modifications to all structs defined here are
  * subject to backwards-compatibility constraints:
@@ -39,6 +50,15 @@
 #define MSM_PIPE_2D1         0x02
 #define MSM_PIPE_3D0         0x10
 
+/* The pipe-id just uses the lower bits, so can be OR'd with flags in
+ * the upper 16 bits (which could be extended further, if needed, maybe
+ * we extend/overload the pipe-id some day to deal with multiple rings,
+ * but even then I don't think we need the full lower 16 bits).
+ */
+#define MSM_PIPE_ID_MASK     0xffff
+#define MSM_PIPE_ID(x)       ((x) & MSM_PIPE_ID_MASK)
+#define MSM_PIPE_FLAGS(x)    ((x) & ~MSM_PIPE_ID_MASK)
+
 /* timeouts are specified in clock-monotonic absolute times (to simplify
  * restarting interrupted ioctls).  The following struct is logically the
  * same as 'struct timespec' but 32/64b ABI safe.
@@ -48,9 +68,56 @@ struct drm_msm_timespec {
 	__s64 tv_nsec;         /* nanoseconds */
 };
 
+/*
+ * HDR Metadata
+ * These are defined as per EDID spec and shall be used by the sink
+ * to set the HDR metadata for playback from userspace.
+ */
+
+#define HDR_PRIMARIES_COUNT   3
+
+/* HDR EOTF */
+#define HDR_EOTF_SDR_LUM_RANGE	0x0
+#define HDR_EOTF_HDR_LUM_RANGE	0x1
+#define HDR_EOTF_SMTPE_ST2084	0x2
+#define HDR_EOTF_HLG		0x3
+
+#define DRM_MSM_EXT_HDR_METADATA
+struct drm_msm_ext_hdr_metadata {
+	__u32 hdr_state;        /* HDR state */
+	__u32 eotf;             /* electro optical transfer function */
+	__u32 hdr_supported;    /* HDR supported */
+	__u32 display_primaries_x[HDR_PRIMARIES_COUNT]; /* Primaries x */
+	__u32 display_primaries_y[HDR_PRIMARIES_COUNT]; /* Primaries y */
+	__u32 white_point_x;    /* white_point_x */
+	__u32 white_point_y;    /* white_point_y */
+	__u32 max_luminance;    /* Max luminance */
+	__u32 min_luminance;    /* Min Luminance */
+	__u32 max_content_light_level; /* max content light level */
+	__u32 max_average_light_level; /* max average light level */
+};
+
+/**
+ * HDR sink properties
+ * These are defined as per EDID spec and shall be used by the userspace
+ * to determine the HDR properties to be set to the sink.
+ */
+#define DRM_MSM_EXT_HDR_PROPERTIES
+struct drm_msm_ext_hdr_properties {
+	__u8 hdr_metadata_type_one;   /* static metadata type one */
+	__u32 hdr_supported;          /* HDR supported */
+	__u32 hdr_eotf;               /* electro optical transfer function */
+	__u32 hdr_max_luminance;      /* Max luminance */
+	__u32 hdr_avg_luminance;      /* Avg luminance */
+	__u32 hdr_min_luminance;      /* Min Luminance */
+};
+
 #define MSM_PARAM_GPU_ID     0x01
 #define MSM_PARAM_GMEM_SIZE  0x02
 #define MSM_PARAM_CHIP_ID    0x03
+#define MSM_PARAM_MAX_FREQ   0x04
+#define MSM_PARAM_TIMESTAMP  0x05
+#define MSM_PARAM_GMEM_BASE  0x06
 
 struct drm_msm_param {
 	__u32 pipe;           /* in, MSM_PIPE_x */
@@ -82,10 +149,14 @@ struct drm_msm_gem_new {
 	__u32 handle;         /* out */
 };
 
+#define MSM_INFO_IOVA	0x01
+
+#define MSM_INFO_FLAGS (MSM_INFO_IOVA)
+
 struct drm_msm_gem_info {
 	__u32 handle;         /* in */
-	__u32 pad;
-	__u64 offset;         /* out, offset to pass to mmap() */
+	__u32 flags;	      /* in - combination of MSM_INFO_* flags */
+	__u64 offset;         /* out, mmap() offset or iova */
 };
 
 #define MSM_PREP_READ        0x01
@@ -121,7 +192,11 @@ struct drm_msm_gem_cpu_fini {
  */
 struct drm_msm_gem_submit_reloc {
 	__u32 submit_offset;  /* in, offset from submit_bo */
-	__u32 or;             /* in, value OR'd with result */
+#ifdef __cplusplus
+	__u32 or_val;
+#else
+	__u32 or; /* in, value OR'd with result */
+#endif
 	__s32  shift;          /* in, amount of left shift (can be negative) */
 	__u32 reloc_idx;      /* in, index of reloc_bo buffer */
 	__u64 reloc_offset;   /* in, offset from start of reloc_bo */
@@ -145,7 +220,7 @@ struct drm_msm_gem_submit_cmd {
 	__u32 size;           /* in, cmdstream size */
 	__u32 pad;
 	__u32 nr_relocs;      /* in, number of submit_reloc's */
-	__u64 __user relocs;  /* in, ptr to array of submit_reloc's */
+	__u64 relocs;         /* in, ptr to array of submit_reloc's */
 };
 
 /* Each buffer referenced elsewhere in the cmdstream submit (ie. the
@@ -170,17 +245,28 @@ struct drm_msm_gem_submit_bo {
 	__u64 presumed;       /* in/out, presumed buffer address */
 };
 
+/* Valid submit ioctl flags: */
+#define MSM_SUBMIT_NO_IMPLICIT   0x80000000 /* disable implicit sync */
+#define MSM_SUBMIT_FENCE_FD_IN   0x40000000 /* enable input fence_fd */
+#define MSM_SUBMIT_FENCE_FD_OUT  0x20000000 /* enable output fence_fd */
+#define MSM_SUBMIT_FLAGS                ( \
+		MSM_SUBMIT_NO_IMPLICIT   | \
+		MSM_SUBMIT_FENCE_FD_IN   | \
+		MSM_SUBMIT_FENCE_FD_OUT  | \
+		0)
+
 /* Each cmdstream submit consists of a table of buffers involved, and
  * one or more cmdstream buffers.  This allows for conditional execution
  * (context-restore), and IB buffers needed for per tile/bin draw cmds.
  */
 struct drm_msm_gem_submit {
-	__u32 pipe;           /* in, MSM_PIPE_x */
+	__u32 flags;          /* MSM_PIPE_x | MSM_SUBMIT_x */
 	__u32 fence;          /* out */
 	__u32 nr_bos;         /* in, number of submit_bo's */
 	__u32 nr_cmds;        /* in, number of submit_cmd's */
-	__u64 __user bos;     /* in, ptr to array of submit_bo's */
-	__u64 __user cmds;    /* in, ptr to array of submit_cmd's */
+	__u64 bos;            /* in, ptr to array of submit_bo's */
+	__u64 cmds;           /* in, ptr to array of submit_cmd's */
+	__s32 fence_fd;       /* in/out fence fd (see MSM_SUBMIT_FENCE_FD_IN/OUT) */
 };
 
 /* The normal way to synchronize with the GPU is just to CPU_PREP on
@@ -196,6 +282,84 @@ struct drm_msm_wait_fence {
 	struct drm_msm_timespec timeout;   /* in */
 };
 
+/* madvise provides a way to tell the kernel in case a buffers contents
+ * can be discarded under memory pressure, which is useful for userspace
+ * bo cache where we want to optimistically hold on to buffer allocate
+ * and potential mmap, but allow the pages to be discarded under memory
+ * pressure.
+ *
+ * Typical usage would involve madvise(DONTNEED) when buffer enters BO
+ * cache, and madvise(WILLNEED) if trying to recycle buffer from BO cache.
+ * In the WILLNEED case, 'retained' indicates to userspace whether the
+ * backing pages still exist.
+ */
+#define MSM_MADV_WILLNEED 0       /* backing pages are needed, status returned in 'retained' */
+#define MSM_MADV_DONTNEED 1       /* backing pages not needed */
+#define __MSM_MADV_PURGED 2       /* internal state */
+
+struct drm_msm_gem_madvise {
+	__u32 handle;         /* in, GEM handle */
+	__u32 madv;           /* in, MSM_MADV_x */
+	__u32 retained;       /* out, whether backing store still exists */
+};
+
+/* HDR WRGB x and y index */
+#define DISPLAY_PRIMARIES_WX 0
+#define DISPLAY_PRIMARIES_WY 1
+#define DISPLAY_PRIMARIES_RX 2
+#define DISPLAY_PRIMARIES_RY 3
+#define DISPLAY_PRIMARIES_GX 4
+#define DISPLAY_PRIMARIES_GY 5
+#define DISPLAY_PRIMARIES_BX 6
+#define DISPLAY_PRIMARIES_BY 7
+#define DISPLAY_PRIMARIES_MAX 8
+
+struct drm_panel_hdr_properties {
+	__u32 hdr_enabled;
+
+	/* WRGB X and y values arrayed in format */
+	/* [WX, WY, RX, RY, GX, GY, BX, BY] */
+	__u32 display_primaries[DISPLAY_PRIMARIES_MAX];
+
+	/* peak brightness supported by panel */
+	__u32 peak_brightness;
+	/* Blackness level supported by panel */
+	__u32 blackness_level;
+};
+
+/**
+ * struct drm_msm_event_req - Payload to event enable/disable ioctls.
+ * @object_id: DRM object id. e.g.: for crtc pass crtc id.
+ * @object_type: DRM object type. e.g.: for crtc set it to DRM_MODE_OBJECT_CRTC.
+ * @event: Event for which notification is being enabled/disabled.
+ *         e.g.: for Histogram set - DRM_EVENT_HISTOGRAM.
+ * @client_context: Opaque pointer that will be returned during event response
+ *                  notification.
+ * @index: Object index(e.g.: crtc index), optional for user-space to set.
+ *         Driver will override value based on object_id and object_type.
+ */
+struct drm_msm_event_req {
+	__u32 object_id;
+	__u32 object_type;
+	__u32 event;
+	__u64 client_context;
+	__u32 index;
+};
+
+/**
+ * struct drm_msm_event_resp - payload returned when read is called for
+ *                            custom notifications.
+ * @base: Event type and length of complete notification payload.
+ * @info: Contains information about DRM that which raised this event.
+ * @data: Custom payload that driver returns for event type.
+ *        size of data = base.length - (sizeof(base) + sizeof(info))
+ */
+struct drm_msm_event_resp {
+	struct drm_event base;
+	struct drm_msm_event_req info;
+	__u8 data[];
+};
+
 #define DRM_MSM_GET_PARAM              0x00
 /* placeholder:
 #define DRM_MSM_SET_PARAM              0x01
@@ -206,7 +370,22 @@ struct drm_msm_wait_fence {
 #define DRM_MSM_GEM_CPU_FINI           0x05
 #define DRM_MSM_GEM_SUBMIT             0x06
 #define DRM_MSM_WAIT_FENCE             0x07
-#define DRM_MSM_NUM_IOCTLS             0x08
+#define DRM_MSM_GEM_MADVISE            0x08
+
+#define DRM_SDE_WB_CONFIG              0x40
+#define DRM_MSM_REGISTER_EVENT         0x41
+#define DRM_MSM_DEREGISTER_EVENT       0x42
+#define DRM_MSM_RMFB2                  0x43
+
+/* sde custom events */
+#define DRM_EVENT_HISTOGRAM 0x80000000
+#define DRM_EVENT_AD_BACKLIGHT 0x80000001
+#define DRM_EVENT_CRTC_POWER 0x80000002
+#define DRM_EVENT_SYS_BACKLIGHT 0x80000003
+#define DRM_EVENT_SDE_POWER 0x80000004
+#define DRM_EVENT_IDLE_NOTIFY 0x80000005
+#define DRM_EVENT_PANEL_DEAD 0x80000006 /* ESD event */
+#define DRM_EVENT_SDE_HW_RECOVERY 0X80000007
 
 #define DRM_IOCTL_MSM_GET_PARAM        DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_GET_PARAM, struct drm_msm_param)
 #define DRM_IOCTL_MSM_GEM_NEW          DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_GEM_NEW, struct drm_msm_gem_new)
@@ -215,5 +394,18 @@ struct drm_msm_wait_fence {
 #define DRM_IOCTL_MSM_GEM_CPU_FINI     DRM_IOW (DRM_COMMAND_BASE + DRM_MSM_GEM_CPU_FINI, struct drm_msm_gem_cpu_fini)
 #define DRM_IOCTL_MSM_GEM_SUBMIT       DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_GEM_SUBMIT, struct drm_msm_gem_submit)
 #define DRM_IOCTL_MSM_WAIT_FENCE       DRM_IOW (DRM_COMMAND_BASE + DRM_MSM_WAIT_FENCE, struct drm_msm_wait_fence)
+#define DRM_IOCTL_MSM_GEM_MADVISE      DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_GEM_MADVISE, struct drm_msm_gem_madvise)
+#define DRM_IOCTL_SDE_WB_CONFIG \
+	DRM_IOW((DRM_COMMAND_BASE + DRM_SDE_WB_CONFIG), struct sde_drm_wb_cfg)
+#define DRM_IOCTL_MSM_REGISTER_EVENT   DRM_IOW((DRM_COMMAND_BASE + \
+			DRM_MSM_REGISTER_EVENT), struct drm_msm_event_req)
+#define DRM_IOCTL_MSM_DEREGISTER_EVENT DRM_IOW((DRM_COMMAND_BASE + \
+			DRM_MSM_DEREGISTER_EVENT), struct drm_msm_event_req)
+#define DRM_IOCTL_MSM_RMFB2 DRM_IOW((DRM_COMMAND_BASE + \
+			DRM_MSM_RMFB2), unsigned int)
+
+#if defined(__cplusplus)
+}
+#endif
 
 #endif /* __MSM_DRM_H__ */

@@ -24,7 +24,8 @@ static inline int __pure __get_cpu_type(const int cpu_type)
 	case CPU_LOONGSON3:
 #endif
 
-#ifdef CONFIG_SYS_HAS_CPU_LOONGSON1B
+#if defined(CONFIG_SYS_HAS_CPU_LOONGSON1B) || \
+    defined(CONFIG_SYS_HAS_CPU_LOONGSON1C)
 	case CPU_LOONGSON1:
 #endif
 
@@ -46,6 +47,7 @@ static inline int __pure __get_cpu_type(const int cpu_type)
 	case CPU_34K:
 	case CPU_1004K:
 	case CPU_74K:
+	case CPU_1074K:
 	case CPU_M14KC:
 	case CPU_M14KEC:
 	case CPU_INTERAPTIV:
@@ -77,8 +79,14 @@ static inline int __pure __get_cpu_type(const int cpu_type)
 	 */
 #endif
 
+#ifdef CONFIG_SYS_HAS_CPU_MIPS32_R6
+	case CPU_M6250:
+#endif
+
 #ifdef CONFIG_SYS_HAS_CPU_MIPS64_R6
 	case CPU_I6400:
+	case CPU_I6500:
+	case CPU_P6600:
 #endif
 
 #ifdef CONFIG_SYS_HAS_CPU_R3000
@@ -142,11 +150,6 @@ static inline int __pure __get_cpu_type(const int cpu_type)
 
 #ifdef CONFIG_SYS_HAS_CPU_R5500
 	case CPU_R5500:
-#endif
-
-#ifdef CONFIG_SYS_HAS_CPU_R6000
-	case CPU_R6000:
-	case CPU_R6000A:
 #endif
 
 #ifdef CONFIG_SYS_HAS_CPU_NEVADA

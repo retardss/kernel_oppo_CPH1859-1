@@ -212,6 +212,7 @@ static irqreturn_t riic_tend_isr(int irq, void *data)
 	if (readb(riic->base + RIIC_ICSR2) & ICSR2_NACKF) {
 		/* We got a NACKIE */
 		readb(riic->base + RIIC_ICDRR);	/* dummy read */
+		riic_clear_set_bit(riic, ICSR2_NACKF, 0, RIIC_ICSR2);
 		riic->err = -ENXIO;
 	} else if (riic->bytes_left) {
 		return IRQ_NONE;
@@ -403,10 +404,8 @@ static int riic_i2c_probe(struct platform_device *pdev)
 
 
 	ret = i2c_add_adapter(adap);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to add adapter\n");
+	if (ret)
 		return ret;
-	}
 
 	platform_set_drvdata(pdev, riic);
 

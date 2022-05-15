@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 #include "perf.h"
 #include "util/util.h"
 #include "util/debug.h"
-#include "util/parse-options.h"
+#include <subcmd/parse-options.h>
 #include "util/parse-regs-options.h"
 
 int
@@ -40,7 +41,7 @@ parse_regs(const struct option *opt, const char *str, int unset)
 				}
 				fputc('\n', stderr);
 				/* just printing available regs */
-				return -1;
+				goto error;
 			}
 			for (r = sample_reg_masks; r->name; r++) {
 				if (!strcasecmp(s, r->name))

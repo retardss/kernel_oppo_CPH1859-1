@@ -28,27 +28,27 @@ static void of_get_regulation_constraints(struct device_node *np,
 					struct regulator_init_data **init_data,
 					const struct regulator_desc *desc)
 {
-	const __be32 *min_uV, *max_uV;
 	struct regulation_constraints *constraints = &(*init_data)->constraints;
 	struct regulator_state *suspend_state;
 	struct device_node *suspend_np;
+	unsigned int mode;
 	int ret, i;
 	u32 pval;
 
 	constraints->name = of_get_property(np, "regulator-name", NULL);
 
-	min_uV = of_get_property(np, "regulator-min-microvolt", NULL);
-	if (min_uV)
-		constraints->min_uV = be32_to_cpu(*min_uV);
-	max_uV = of_get_property(np, "regulator-max-microvolt", NULL);
-	if (max_uV)
-		constraints->max_uV = be32_to_cpu(*max_uV);
+	if (!of_property_read_u32(np, "regulator-min-microvolt", &pval))
+		constraints->min_uV = pval;
+
+	if (!of_property_read_u32(np, "regulator-max-microvolt", &pval))
+		constraints->max_uV = pval;
 
 	/* Voltage change possible? */
 	if (constraints->min_uV != constraints->max_uV)
 		constraints->valid_ops_mask |= REGULATOR_CHANGE_VOLTAGE;
-	/* Only one voltage?  Then make sure it's set. */
-	if (min_uV && max_uV && constraints->min_uV == constraints->max_uV)
+
+	/* Do we have a voltage range, if so try to apply it? */
+	if (constraints->min_uV && constraints->max_uV)
 		constraints->apply_uV = true;
 
 	if (!of_property_read_u32(np, "regulator-microvolt-offset", &pval))
@@ -87,20 +87,49 @@ static void of_get_regulation_constraints(struct device_node *np,
 			constraints->ramp_disable = true;
 	}
 
+	ret = of_property_read_u32(np, "regulator-settling-time-us", &pval);
+	if (!ret)
+		constraints->settling_time = pval;
+
+	ret = of_property_read_u32(np, "regulator-settling-time-up-us", &pval);
+	if (!ret)
+		constraints->settling_time_up = pval;
+	if (constraints->settling_time_up && constraints->settling_time) {
+		pr_warn("%s: ambiguous configuration for settling time, ignoring 'regulator-settling-time-up-us'\n",
+			np->name);
+		constraints->settling_time_up = 0;
+	}
+
+	ret = of_property_read_u32(np, "regulator-settling-time-down-us",
+				   &pval);
+	if (!ret)
+		constraints->settling_time_down = pval;
+	if (constraints->settling_time_down && constraints->settling_time) {
+		pr_warn("%s: ambiguous configuration for settling time, ignoring 'regulator-settling-time-down-us'\n",
+			np->name);
+		constraints->settling_time_down = 0;
+	}
+
 	ret = of_property_read_u32(np, "regulator-enable-ramp-delay", &pval);
 	if (!ret)
 		constraints->enable_time = pval;
 
 	constraints->soft_start = of_property_read_bool(np,
 					"regulator-soft-start");
+	ret = of_property_read_u32(np, "regulator-active-discharge", &pval);
+	if (!ret) {
+		constraints->active_discharge =
+				(pval) ? REGULATOR_ACTIVE_DISCHARGE_ENABLE :
+					REGULATOR_ACTIVE_DISCHARGE_DISABLE;
+	}
 
 	if (!of_property_read_u32(np, "regulator-initial-mode", &pval)) {
 		if (desc && desc->of_map_mode) {
-			ret = desc->of_map_mode(pval);
-			if (ret == -EINVAL)
+			mode = desc->of_map_mode(pval);
+			if (mode == REGULATOR_MODE_INVALID)
 				pr_err("%s: invalid mode %u\n", np->name, pval);
 			else
-				constraints->initial_mode = ret;
+				constraints->initial_mode = mode;
 		} else {
 			pr_warn("%s: mapping for mode %d not defined\n",
 				np->name, pval);
@@ -122,7 +151,7 @@ static void of_get_regulation_constraints(struct device_node *np,
 			suspend_state = &constraints->state_disk;
 			break;
 		case PM_SUSPEND_ON:
-		case PM_SUSPEND_FREEZE:
+		case PM_SUSPEND_TO_IDLE:
 		case PM_SUSPEND_STANDBY:
 		default:
 			continue;
@@ -135,12 +164,12 @@ static void of_get_regulation_constraints(struct device_node *np,
 		if (!of_property_read_u32(suspend_np, "regulator-mode",
 					  &pval)) {
 			if (desc && desc->of_map_mode) {
-				ret = desc->of_map_mode(pval);
-				if (ret == -EINVAL)
+				mode = desc->of_map_mode(pval);
+				if (mode == REGULATOR_MODE_INVALID)
 					pr_err("%s: invalid mode %u\n",
 					       np->name, pval);
 				else
-					suspend_state->mode = ret;
+					suspend_state->mode = mode;
 			} else {
 				pr_warn("%s: mapping for mode %d not defined\n",
 					np->name, pval);
@@ -157,6 +186,9 @@ static void of_get_regulation_constraints(struct device_node *np,
 		if (!of_property_read_u32(suspend_np,
 					"regulator-suspend-microvolt", &pval))
 			suspend_state->uV = pval;
+
+		if (i == PM_SUSPEND_MEM)
+			constraints->initial_state = PM_SUSPEND_MEM;
 
 		of_node_put(suspend_np);
 		suspend_state = NULL;
@@ -303,7 +335,7 @@ struct regulator_init_data *regulator_of_get_init_data(struct device *dev,
 		search = of_get_child_by_name(dev->of_node,
 					      desc->regulators_node);
 	else
-		search = dev->of_node;
+		search = of_node_get(dev->of_node);
 
 	if (!search) {
 		dev_dbg(dev, "Failed to find regulator container node '%s'\n",

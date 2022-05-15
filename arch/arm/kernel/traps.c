@@ -25,10 +25,13 @@
 #include <linux/bug.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task_stack.h>
 #include <linux/irq.h>
 
 #include <linux/atomic.h>
+#include <asm/arch_timer.h>
 #include <asm/cacheflush.h>
 #include <asm/exception.h>
 #include <asm/unistd.h>
@@ -75,6 +78,26 @@ void dump_backtrace_entry(unsigned long where, unsigned long from, unsigned long
 
 	if (in_exception_text(where))
 		dump_mem("", "Exception stack", frame + 4, frame + 4 + sizeof(struct pt_regs));
+}
+
+void dump_backtrace_stm(u32 *stack, u32 instruction)
+{
+	char str[80], *p;
+	unsigned int x;
+	int reg;
+
+	for (reg = 10, x = 0, p = str; reg >= 0; reg--) {
+		if (instruction & BIT(reg)) {
+			p += sprintf(p, " r%d:%08x", reg, *stack--);
+			if (++x == 6) {
+				x = 0;
+				p = str;
+				printk("%s\n", str);
+			}
+		}
+	}
+	if (p != str)
+		printk("%s\n", str);
 }
 
 #ifndef CONFIG_ARM_UNWIND
@@ -725,6 +748,42 @@ late_initcall(arm_mrc_hook_init);
 
 #endif
 
+static int get_pct_trap(struct pt_regs *regs, unsigned int instr)
+{
+	u64 cntpct;
+	unsigned int res;
+	int rd = (instr >> 12) & 0xF;
+	int rn =  (instr >> 16) & 0xF;
+
+	res = arm_check_condition(instr, regs->ARM_cpsr);
+	if (res == ARM_OPCODE_CONDTEST_FAIL) {
+		regs->ARM_pc += 4;
+		return 0;
+	}
+
+	if (rd == 15 || rn == 15)
+		return 1;
+	cntpct = arch_counter_get_cntpct();
+	regs->uregs[rd] = cntpct;
+	regs->uregs[rn] = cntpct >> 32;
+	regs->ARM_pc += 4;
+	return 0;
+}
+
+static struct undef_hook get_pct_hook = {
+	.instr_mask	= 0x0ff00fff,
+	.instr_val	= 0x0c500f0e,
+	.cpsr_mask	= MODE_MASK,
+	.cpsr_val	= USR_MODE,
+	.fn		= get_pct_trap,
+};
+
+void get_pct_hook_init(void)
+{
+	register_undef_hook(&get_pct_hook);
+}
+EXPORT_SYMBOL(get_pct_hook_init);
+
 /*
  * A data abort trap was taken, but we did not handle the instruction.
  * Try to abort the user program, or panic if it was the kernel.
@@ -788,7 +847,6 @@ void abort(void)
 	/* if that doesn't kill us, halt */
 	panic("Oops failed to kill thread");
 }
-EXPORT_SYMBOL(abort);
 
 void __init trap_init(void)
 {

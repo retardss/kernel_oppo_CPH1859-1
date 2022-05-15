@@ -27,7 +27,7 @@
 #define F2FS_XATTR_REFCOUNT_MAX         1024
 
 /* Name indexes */
-#define F2FS_SYSTEM_ADVISE_PREFIX		"system.advise"
+#define F2FS_SYSTEM_ADVISE_NAME			"system.advise"
 #define F2FS_XATTR_INDEX_USER			1
 #define F2FS_XATTR_INDEX_POSIX_ACL_ACCESS	2
 #define F2FS_XATTR_INDEX_POSIX_ACL_DEFAULT	3
@@ -74,6 +74,8 @@ struct f2fs_xattr_entry {
 				entry = XATTR_NEXT_ENTRY(entry))
 #define VALID_XATTR_BLOCK_SIZE	(PAGE_SIZE - sizeof(struct node_footer))
 #define XATTR_PADDING_SIZE	(sizeof(__u32))
+#define XATTR_SIZE(x,i)		(((x) ? VALID_XATTR_BLOCK_SIZE : 0) +	\
+						(inline_xattr_size(i)))
 #define MIN_OFFSET(i)		XATTR_ALIGN(inline_xattr_size(i) +	\
 						VALID_XATTR_BLOCK_SIZE)
 

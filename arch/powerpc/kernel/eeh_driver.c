@@ -34,6 +34,11 @@
 #include <asm/prom.h>
 #include <asm/rtas.h>
 
+struct eeh_rmv_data {
+	struct list_head edev_list;
+	int removed;
+};
+
 /**
  * eeh_pcid_name - Retrieve name of PCI device driver
  * @pdev: PCI device
@@ -134,7 +139,7 @@ static void eeh_enable_irq(struct pci_dev *dev)
 		 * into it.
 		 *
 		 * That's just wrong.The warning in the core code is
-		 * there to tell people to fix their assymetries in
+		 * there to tell people to fix their asymmetries in
 		 * their own code, not by abusing the core information
 		 * to avoid it.
 		 *
@@ -200,20 +205,20 @@ static void *eeh_report_error(void *data, void *userdata)
 	enum pci_ers_result rc, *res = userdata;
 	struct pci_driver *driver;
 
-	if (!dev || eeh_dev_removed(edev))
+	if (!dev || eeh_dev_removed(edev) || eeh_pe_passed(edev->pe))
 		return NULL;
+
+	device_lock(&dev->dev);
 	dev->error_state = pci_channel_io_frozen;
 
 	driver = eeh_pcid_get(dev);
-	if (!driver) return NULL;
+	if (!driver) goto out_no_dev;
 
 	eeh_disable_irq(dev);
 
 	if (!driver->err_handler ||
-	    !driver->err_handler->error_detected) {
-		eeh_pcid_put(dev);
-		return NULL;
-	}
+	    !driver->err_handler->error_detected)
+		goto out;
 
 	rc = driver->err_handler->error_detected(dev, pci_channel_io_frozen);
 
@@ -221,7 +226,11 @@ static void *eeh_report_error(void *data, void *userdata)
 	if (rc == PCI_ERS_RESULT_NEED_RESET) *res = rc;
 	if (*res == PCI_ERS_RESULT_NONE) *res = rc;
 
+	edev->in_error = true;
+out:
 	eeh_pcid_put(dev);
+out_no_dev:
+	device_unlock(&dev->dev);
 	return NULL;
 }
 
@@ -241,18 +250,17 @@ static void *eeh_report_mmio_enabled(void *data, void *userdata)
 	enum pci_ers_result rc, *res = userdata;
 	struct pci_driver *driver;
 
-	if (!dev || eeh_dev_removed(edev))
+	if (!dev || eeh_dev_removed(edev) || eeh_pe_passed(edev->pe))
 		return NULL;
 
+	device_lock(&dev->dev);
 	driver = eeh_pcid_get(dev);
-	if (!driver) return NULL;
+	if (!driver) goto out_no_dev;
 
 	if (!driver->err_handler ||
 	    !driver->err_handler->mmio_enabled ||
-	    (edev->mode & EEH_DEV_NO_HANDLER)) {
-		eeh_pcid_put(dev);
-		return NULL;
-	}
+	    (edev->mode & EEH_DEV_NO_HANDLER))
+		goto out;
 
 	rc = driver->err_handler->mmio_enabled(dev);
 
@@ -260,7 +268,10 @@ static void *eeh_report_mmio_enabled(void *data, void *userdata)
 	if (rc == PCI_ERS_RESULT_NEED_RESET) *res = rc;
 	if (*res == PCI_ERS_RESULT_NONE) *res = rc;
 
+out:
 	eeh_pcid_put(dev);
+out_no_dev:
+	device_unlock(&dev->dev);
 	return NULL;
 }
 
@@ -281,21 +292,22 @@ static void *eeh_report_reset(void *data, void *userdata)
 	enum pci_ers_result rc, *res = userdata;
 	struct pci_driver *driver;
 
-	if (!dev || eeh_dev_removed(edev))
+	if (!dev || eeh_dev_removed(edev) || eeh_pe_passed(edev->pe))
 		return NULL;
+
+	device_lock(&dev->dev);
 	dev->error_state = pci_channel_io_normal;
 
 	driver = eeh_pcid_get(dev);
-	if (!driver) return NULL;
+	if (!driver) goto out_no_dev;
 
 	eeh_enable_irq(dev);
 
 	if (!driver->err_handler ||
 	    !driver->err_handler->slot_reset ||
-	    (edev->mode & EEH_DEV_NO_HANDLER)) {
-		eeh_pcid_put(dev);
-		return NULL;
-	}
+	    (edev->mode & EEH_DEV_NO_HANDLER) ||
+	    (!edev->in_error))
+		goto out;
 
 	rc = driver->err_handler->slot_reset(dev);
 	if ((*res == PCI_ERS_RESULT_NONE) ||
@@ -303,7 +315,10 @@ static void *eeh_report_reset(void *data, void *userdata)
 	if (*res == PCI_ERS_RESULT_DISCONNECT &&
 	     rc == PCI_ERS_RESULT_NEED_RESET) *res = rc;
 
+out:
 	eeh_pcid_put(dev);
+out_no_dev:
+	device_unlock(&dev->dev);
 	return NULL;
 }
 
@@ -349,28 +364,35 @@ static void *eeh_report_resume(void *data, void *userdata)
 {
 	struct eeh_dev *edev = (struct eeh_dev *)data;
 	struct pci_dev *dev = eeh_dev_to_pci_dev(edev);
+	bool was_in_error;
 	struct pci_driver *driver;
 
-	if (!dev || eeh_dev_removed(edev))
+	if (!dev || eeh_dev_removed(edev) || eeh_pe_passed(edev->pe))
 		return NULL;
+
+	device_lock(&dev->dev);
 	dev->error_state = pci_channel_io_normal;
 
 	driver = eeh_pcid_get(dev);
-	if (!driver) return NULL;
+	if (!driver) goto out_no_dev;
 
+	was_in_error = edev->in_error;
+	edev->in_error = false;
 	eeh_enable_irq(dev);
 
 	if (!driver->err_handler ||
 	    !driver->err_handler->resume ||
-	    (edev->mode & EEH_DEV_NO_HANDLER)) {
+	    (edev->mode & EEH_DEV_NO_HANDLER) || !was_in_error) {
 		edev->mode &= ~EEH_DEV_NO_HANDLER;
-		eeh_pcid_put(dev);
-		return NULL;
+		goto out;
 	}
 
 	driver->err_handler->resume(dev);
 
+out:
 	eeh_pcid_put(dev);
+out_no_dev:
+	device_unlock(&dev->dev);
 	return NULL;
 }
 
@@ -388,24 +410,56 @@ static void *eeh_report_failure(void *data, void *userdata)
 	struct pci_dev *dev = eeh_dev_to_pci_dev(edev);
 	struct pci_driver *driver;
 
-	if (!dev || eeh_dev_removed(edev))
+	if (!dev || eeh_dev_removed(edev) || eeh_pe_passed(edev->pe))
 		return NULL;
+
+	device_lock(&dev->dev);
 	dev->error_state = pci_channel_io_perm_failure;
 
 	driver = eeh_pcid_get(dev);
-	if (!driver) return NULL;
+	if (!driver) goto out_no_dev;
 
 	eeh_disable_irq(dev);
 
 	if (!driver->err_handler ||
-	    !driver->err_handler->error_detected) {
-		eeh_pcid_put(dev);
-		return NULL;
-	}
+	    !driver->err_handler->error_detected)
+		goto out;
 
 	driver->err_handler->error_detected(dev, pci_channel_io_perm_failure);
 
+out:
 	eeh_pcid_put(dev);
+out_no_dev:
+	device_unlock(&dev->dev);
+	return NULL;
+}
+
+static void *eeh_add_virt_device(void *data, void *userdata)
+{
+	struct pci_driver *driver;
+	struct eeh_dev *edev = (struct eeh_dev *)data;
+	struct pci_dev *dev = eeh_dev_to_pci_dev(edev);
+	struct pci_dn *pdn = eeh_dev_to_pdn(edev);
+
+	if (!(edev->physfn)) {
+		pr_warn("%s: EEH dev %04x:%02x:%02x.%01x not for VF\n",
+			__func__, pdn->phb->global_number, pdn->busno,
+			PCI_SLOT(pdn->devfn), PCI_FUNC(pdn->devfn));
+		return NULL;
+	}
+
+	driver = eeh_pcid_get(dev);
+	if (driver) {
+		if (driver->err_handler) {
+			eeh_pcid_put(dev);
+			return NULL;
+		}
+		eeh_pcid_put(dev);
+	}
+
+#ifdef CONFIG_PPC_POWERNV
+	pci_iov_add_virtfn(edev->physfn, pdn->vf_index, 0);
+#endif
 	return NULL;
 }
 
@@ -414,7 +468,8 @@ static void *eeh_rmv_device(void *data, void *userdata)
 	struct pci_driver *driver;
 	struct eeh_dev *edev = (struct eeh_dev *)data;
 	struct pci_dev *dev = eeh_dev_to_pci_dev(edev);
-	int *removed = (int *)userdata;
+	struct eeh_rmv_data *rmv_data = (struct eeh_rmv_data *)userdata;
+	int *removed = rmv_data ? &rmv_data->removed : NULL;
 
 	/*
 	 * Actually, we should remove the PCI bridges as well.
@@ -423,7 +478,7 @@ static void *eeh_rmv_device(void *data, void *userdata)
 	 * support EEH. So we just care about PCI devices for
 	 * simplicity here.
 	 */
-	if (!dev || (dev->hdr_type & PCI_HEADER_TYPE_BRIDGE))
+	if (!dev || (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE))
 		return NULL;
 
 	/*
@@ -436,13 +491,19 @@ static void *eeh_rmv_device(void *data, void *userdata)
 	if (eeh_dev_removed(edev))
 		return NULL;
 
-	driver = eeh_pcid_get(dev);
-	if (driver) {
-		eeh_pcid_put(dev);
-		if (driver->err_handler &&
-		    driver->err_handler->error_detected &&
-		    driver->err_handler->slot_reset)
+	if (removed) {
+		if (eeh_pe_passed(edev->pe))
 			return NULL;
+		driver = eeh_pcid_get(dev);
+		if (driver) {
+			if (driver->err_handler &&
+			    driver->err_handler->error_detected &&
+			    driver->err_handler->slot_reset) {
+				eeh_pcid_put(dev);
+				return NULL;
+			}
+			eeh_pcid_put(dev);
+		}
 	}
 
 	/* Remove it from PCI subsystem */
@@ -450,11 +511,23 @@ static void *eeh_rmv_device(void *data, void *userdata)
 		 pci_name(dev));
 	edev->bus = dev->bus;
 	edev->mode |= EEH_DEV_DISCONNECTED;
-	(*removed)++;
+	if (removed)
+		(*removed)++;
 
-	pci_lock_rescan_remove();
-	pci_stop_and_remove_bus_device(dev);
-	pci_unlock_rescan_remove();
+	if (edev->physfn) {
+#ifdef CONFIG_PPC_POWERNV
+		struct pci_dn *pdn = eeh_dev_to_pdn(edev);
+
+		pci_iov_remove_virtfn(edev->physfn, pdn->vf_index, 0);
+		edev->pdev = NULL;
+#endif
+		if (rmv_data)
+			list_add(&edev->rmv_list, &rmv_data->edev_list);
+	} else {
+		pci_lock_rescan_remove();
+		pci_stop_and_remove_bus_device(dev);
+		pci_unlock_rescan_remove();
+	}
 
 	return NULL;
 }
@@ -515,7 +588,7 @@ static int eeh_clear_pe_frozen_state(struct eeh_pe *pe,
 
 int eeh_pe_reset_and_recover(struct eeh_pe *pe)
 {
-	int result, ret;
+	int ret;
 
 	/* Bail if the PE is being recovered */
 	if (pe->state & EEH_PE_RECOVERING)
@@ -528,7 +601,7 @@ int eeh_pe_reset_and_recover(struct eeh_pe *pe)
 	eeh_pe_dev_traverse(pe, eeh_dev_save_state, NULL);
 
 	/* Issue reset */
-	ret = eeh_reset_pe(pe);
+	ret = eeh_pe_reset_full(pe);
 	if (ret) {
 		eeh_pe_state_clear(pe, EEH_PE_RECOVERING);
 		return ret;
@@ -541,14 +614,8 @@ int eeh_pe_reset_and_recover(struct eeh_pe *pe)
 		return ret;
 	}
 
-	/* Notify completion of reset */
-	eeh_pe_dev_traverse(pe, eeh_report_reset, &result);
-
 	/* Restore device state */
 	eeh_pe_dev_traverse(pe, eeh_dev_restore_state, NULL);
-
-	/* Resume */
-	eeh_pe_dev_traverse(pe, eeh_report_resume, NULL);
 
 	/* Clear recovery mode */
 	eeh_pe_state_clear(pe, EEH_PE_RECOVERING);
@@ -565,11 +632,13 @@ int eeh_pe_reset_and_recover(struct eeh_pe *pe)
  * During the reset, udev might be invoked because those affected
  * PCI devices will be removed and then added.
  */
-static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus)
+static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus,
+				struct eeh_rmv_data *rmv_data)
 {
 	struct pci_bus *frozen_bus = eeh_pe_bus_get(pe);
 	struct timeval tstamp;
-	int cnt, rc, removed = 0;
+	int cnt, rc;
+	struct eeh_dev *edev;
 
 	/* pcibios will clear the counter; save the value */
 	cnt = pe->freeze_count;
@@ -579,16 +648,19 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus)
 	 * We don't remove the corresponding PE instances because
 	 * we need the information afterwords. The attached EEH
 	 * devices are expected to be attached soon when calling
-	 * into pcibios_add_pci_devices().
+	 * into pci_hp_add_devices().
 	 */
 	eeh_pe_state_mark(pe, EEH_PE_KEEP);
 	if (bus) {
-		eeh_pe_state_clear(pe, EEH_PE_PRI_BUS);
-		pci_lock_rescan_remove();
-		pcibios_remove_pci_devices(bus);
-		pci_unlock_rescan_remove();
+		if (pe->type & EEH_PE_VF) {
+			eeh_pe_dev_traverse(pe, eeh_rmv_device, NULL);
+		} else {
+			pci_lock_rescan_remove();
+			pci_hp_remove_devices(bus);
+			pci_unlock_rescan_remove();
+		}
 	} else if (frozen_bus) {
-		eeh_pe_dev_traverse(pe, eeh_rmv_device, &removed);
+		eeh_pe_dev_traverse(pe, eeh_rmv_device, rmv_data);
 	}
 
 	/*
@@ -600,7 +672,7 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus)
 	 * config accesses. So we prefer to block them. However, controlled
 	 * PCI config accesses initiated from EEH itself are allowed.
 	 */
-	rc = eeh_reset_pe(pe);
+	rc = eeh_pe_reset_full(pe);
 	if (rc)
 		return rc;
 
@@ -632,14 +704,24 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus)
 		 * PE. We should disconnect it so the binding can be
 		 * rebuilt when adding PCI devices.
 		 */
+		edev = list_first_entry(&pe->edevs, struct eeh_dev, list);
 		eeh_pe_traverse(pe, eeh_pe_detach_dev, NULL);
-		pcibios_add_pci_devices(bus);
-	} else if (frozen_bus && removed) {
+		if (pe->type & EEH_PE_VF) {
+			eeh_add_virt_device(edev, NULL);
+		} else {
+			eeh_pe_state_clear(pe, EEH_PE_PRI_BUS);
+			pci_hp_add_devices(bus);
+		}
+	} else if (frozen_bus && rmv_data->removed) {
 		pr_info("EEH: Sleep 5s ahead of partial hotplug\n");
 		ssleep(5);
 
+		edev = list_first_entry(&pe->edevs, struct eeh_dev, list);
 		eeh_pe_traverse(pe, eeh_pe_detach_dev, NULL);
-		pcibios_add_pci_devices(frozen_bus);
+		if (pe->type & EEH_PE_VF)
+			eeh_add_virt_device(edev, NULL);
+		else
+			pci_hp_add_devices(frozen_bus);
 	}
 	eeh_pe_state_clear(pe, EEH_PE_KEEP);
 
@@ -655,23 +737,39 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus)
  */
 #define MAX_WAIT_FOR_RECOVERY 300
 
+/**
+ * eeh_handle_normal_event - Handle EEH events on a specific PE
+ * @pe: EEH PE
+ *
+ * Attempts to recover the given PE.  If recovery fails or the PE has failed
+ * too many times, remove the PE.
+ *
+ * Returns true if @pe should no longer be used, else false.
+ */
 static bool eeh_handle_normal_event(struct eeh_pe *pe)
 {
 	struct pci_bus *frozen_bus;
+	struct eeh_dev *edev, *tmp;
 	int rc = 0;
 	enum pci_ers_result result = PCI_ERS_RESULT_NONE;
+	struct eeh_rmv_data rmv_data = {LIST_HEAD_INIT(rmv_data.edev_list), 0};
 
 	frozen_bus = eeh_pe_bus_get(pe);
 	if (!frozen_bus) {
-		pr_err("%s: Cannot find PCI bus for PHB#%d-PE#%x\n",
+		pr_err("%s: Cannot find PCI bus for PHB#%x-PE#%x\n",
 			__func__, pe->phb->global_number, pe->addr);
 		return false;
 	}
 
 	eeh_pe_update_time_stamp(pe);
 	pe->freeze_count++;
-	if (pe->freeze_count > eeh_max_freezes)
-		goto excess_failures;
+	if (pe->freeze_count > eeh_max_freezes) {
+		pr_err("EEH: PHB#%x-PE#%x has failed %d times in the\n"
+		       "last hour and has been permanently disabled.\n",
+		       pe->phb->global_number, pe->addr,
+		       pe->freeze_count);
+		goto hard_fail;
+	}
 	pr_warn("EEH: This PCI device has failed %d times in the last hour\n",
 		pe->freeze_count);
 
@@ -714,7 +812,7 @@ static bool eeh_handle_normal_event(struct eeh_pe *pe)
 	 */
 	if (result == PCI_ERS_RESULT_NONE) {
 		pr_info("EEH: Reset with hotplug activity\n");
-		rc = eeh_reset_device(pe, frozen_bus);
+		rc = eeh_reset_device(pe, frozen_bus, NULL);
 		if (rc) {
 			pr_warn("%s: Unable to reset, err=%d\n",
 				__func__, rc);
@@ -766,7 +864,7 @@ static bool eeh_handle_normal_event(struct eeh_pe *pe)
 	/* If any device called out for a reset, then reset the slot */
 	if (result == PCI_ERS_RESULT_NEED_RESET) {
 		pr_info("EEH: Reset without hotplug activity\n");
-		rc = eeh_reset_device(pe, NULL);
+		rc = eeh_reset_device(pe, NULL, &rmv_data);
 		if (rc) {
 			pr_warn("%s: Cannot reset, err=%d\n",
 				__func__, rc);
@@ -786,31 +884,31 @@ static bool eeh_handle_normal_event(struct eeh_pe *pe)
 		goto hard_fail;
 	}
 
+	/*
+	 * For those hot removed VFs, we should add back them after PF get
+	 * recovered properly.
+	 */
+	list_for_each_entry_safe(edev, tmp, &rmv_data.edev_list, rmv_list) {
+		eeh_add_virt_device(edev, NULL);
+		list_del(&edev->rmv_list);
+	}
+
 	/* Tell all device drivers that they can resume operations */
 	pr_info("EEH: Notify device driver to resume\n");
 	eeh_pe_dev_traverse(pe, eeh_report_resume, NULL);
 
 	return false;
 
-excess_failures:
+hard_fail:
 	/*
 	 * About 90% of all real-life EEH failures in the field
 	 * are due to poorly seated PCI cards. Only 10% or so are
 	 * due to actual, failed cards.
 	 */
-	pr_err("EEH: PHB#%d-PE#%x has failed %d times in the\n"
-	       "last hour and has been permanently disabled.\n"
-	       "Please try reseating or replacing it.\n",
-		pe->phb->global_number, pe->addr,
-		pe->freeze_count);
-	goto perm_error;
-
-hard_fail:
-	pr_err("EEH: Unable to recover from failure from PHB#%d-PE#%x.\n"
+	pr_err("EEH: Unable to recover from failure from PHB#%x-PE#%x.\n"
 	       "Please try reseating or replacing it\n",
 		pe->phb->global_number, pe->addr);
 
-perm_error:
 	eeh_slot_error_detail(pe, EEH_LOG_PERM);
 
 	/* Notify all devices that they're about to go down. */
@@ -825,19 +923,31 @@ perm_error:
 	 * the their PCI config any more.
 	 */
 	if (frozen_bus) {
-		eeh_pe_state_clear(pe, EEH_PE_PRI_BUS);
-		eeh_pe_dev_mode_mark(pe, EEH_DEV_REMOVED);
+		if (pe->type & EEH_PE_VF) {
+			eeh_pe_dev_traverse(pe, eeh_rmv_device, NULL);
+			eeh_pe_dev_mode_mark(pe, EEH_DEV_REMOVED);
+		} else {
+			eeh_pe_state_clear(pe, EEH_PE_PRI_BUS);
+			eeh_pe_dev_mode_mark(pe, EEH_DEV_REMOVED);
 
-		pci_lock_rescan_remove();
-		pcibios_remove_pci_devices(frozen_bus);
-		pci_unlock_rescan_remove();
+			pci_lock_rescan_remove();
+			pci_hp_remove_devices(frozen_bus);
+			pci_unlock_rescan_remove();
 
-		/* The passed PE should no longer be used */
-		return true;
+			/* The passed PE should no longer be used */
+			return true;
+		}
 	}
 	return false;
 }
 
+/**
+ * eeh_handle_special_event - Handle EEH events without a specific failing PE
+ *
+ * Called when an EEH event is detected but can't be narrowed down to a
+ * specific PE.  Iterates through possible failures and handles them as
+ * necessary.
+ */
 static void eeh_handle_special_event(void)
 {
 	struct eeh_pe *pe, *phb_pe;
@@ -921,18 +1031,18 @@ static void eeh_handle_special_event(void)
 
 				/* Notify all devices to be down */
 				eeh_pe_state_clear(pe, EEH_PE_PRI_BUS);
+				eeh_pe_dev_traverse(pe,
+					eeh_report_failure, NULL);
 				bus = eeh_pe_bus_get(phb_pe);
 				if (!bus) {
 					pr_err("%s: Cannot find PCI bus for "
-					       "PHB#%d-PE#%x\n",
+					       "PHB#%x-PE#%x\n",
 					       __func__,
 					       pe->phb->global_number,
 					       pe->addr);
 					break;
 				}
-				eeh_pe_dev_traverse(pe,
-					eeh_report_failure, NULL);
-				pcibios_remove_pci_devices(bus);
+				pci_hp_remove_devices(bus);
 			}
 			pci_unlock_rescan_remove();
 		}

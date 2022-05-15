@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/mm/mempool.c
  *
@@ -102,10 +103,10 @@ static inline void poison_element(mempool_t *pool, void *element)
 }
 #endif /* CONFIG_DEBUG_SLAB || CONFIG_SLUB_DEBUG_ON */
 
-static void kasan_poison_element(mempool_t *pool, void *element)
+static __always_inline void kasan_poison_element(mempool_t *pool, void *element)
 {
 	if (pool->alloc == mempool_alloc_slab || pool->alloc == mempool_kmalloc)
-		kasan_poison_kfree(element);
+		kasan_poison_kfree(element, _RET_IP_);
 	if (pool->alloc == mempool_alloc_pages)
 		kasan_free_pages(element, (unsigned long)pool->pool_data);
 }
@@ -118,7 +119,7 @@ static void kasan_unpoison_element(mempool_t *pool, void *element, gfp_t flags)
 		kasan_alloc_pages(element, (unsigned long)pool->pool_data);
 }
 
-static void add_element(mempool_t *pool, void *element)
+static __always_inline void add_element(mempool_t *pool, void *element)
 {
 	BUG_ON(pool->curr_nr >= pool->min_nr);
 	poison_element(pool, element);
@@ -308,11 +309,11 @@ EXPORT_SYMBOL(mempool_resize);
  * fail if called from an IRQ context.)
  * Note: using __GFP_ZERO is not supported.
  */
-void * mempool_alloc(mempool_t *pool, gfp_t gfp_mask)
+void *mempool_alloc(mempool_t *pool, gfp_t gfp_mask)
 {
 	void *element;
 	unsigned long flags;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 	gfp_t gfp_temp;
 
 	VM_WARN_ON_ONCE(gfp_mask & __GFP_ZERO);

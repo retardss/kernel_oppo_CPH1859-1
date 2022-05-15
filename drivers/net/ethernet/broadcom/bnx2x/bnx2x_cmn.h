@@ -425,6 +425,8 @@ void bnx2x_set_reset_global(struct bnx2x *bp);
 void bnx2x_disable_close_the_gate(struct bnx2x *bp);
 int bnx2x_init_hw_func_cnic(struct bnx2x *bp);
 
+void bnx2x_clear_vlan_info(struct bnx2x *bp);
+
 /**
  * bnx2x_sp_event - handle ramrods completion.
  *
@@ -486,11 +488,14 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev);
 
 /* setup_tc callback */
 int bnx2x_setup_tc(struct net_device *dev, u8 num_tc);
+int __bnx2x_setup_tc(struct net_device *dev, enum tc_setup_type type,
+		     void *type_data);
 
 int bnx2x_get_vf_config(struct net_device *dev, int vf,
 			struct ifla_vf_info *ivi);
 int bnx2x_set_vf_mac(struct net_device *dev, int queue, u8 *mac);
-int bnx2x_set_vf_vlan(struct net_device *netdev, int vf, u16 vlan, u8 qos);
+int bnx2x_set_vf_vlan(struct net_device *netdev, int vf, u16 vlan, u8 qos,
+		      __be16 vlan_proto);
 
 /* select_queue callback */
 u16 bnx2x_select_queue(struct net_device *dev, struct sk_buff *skb,
@@ -568,13 +573,6 @@ int bnx2x_enable_msix(struct bnx2x *bp);
  * @bp:		driver handle
  */
 int bnx2x_enable_msi(struct bnx2x *bp);
-
-/**
- * bnx2x_low_latency_recv - LL callback
- *
- * @napi:	napi structure
- */
-int bnx2x_low_latency_recv(struct napi_struct *napi);
 
 /**
  * bnx2x_alloc_mem_bp - allocate memories outsize main driver structure
@@ -930,6 +928,7 @@ static inline int bnx2x_func_start(struct bnx2x *bp)
 	struct bnx2x_func_state_params func_params = {NULL};
 	struct bnx2x_func_start_params *start_params =
 		&func_params.params.start;
+	u16 port;
 
 	/* Prepare parameters for function state transitions */
 	__set_bit(RAMROD_COMP_WAIT, &func_params.ramrod_flags);
@@ -966,8 +965,14 @@ static inline int bnx2x_func_start(struct bnx2x *bp)
 		start_params->network_cos_mode = STATIC_COS;
 	else /* CHIP_IS_E1X */
 		start_params->network_cos_mode = FW_WRR;
-
-	start_params->vxlan_dst_port = bp->vxlan_dst_port;
+	if (bp->udp_tunnel_ports[BNX2X_UDP_PORT_VXLAN].count) {
+		port = bp->udp_tunnel_ports[BNX2X_UDP_PORT_VXLAN].dst_port;
+		start_params->vxlan_dst_port = port;
+	}
+	if (bp->udp_tunnel_ports[BNX2X_UDP_PORT_GENEVE].count) {
+		port = bp->udp_tunnel_ports[BNX2X_UDP_PORT_GENEVE].dst_port;
+		start_params->geneve_dst_port = port;
+	}
 
 	start_params->inner_rss = 1;
 
@@ -1107,7 +1112,7 @@ static inline u8 bnx2x_get_path_func_num(struct bnx2x *bp)
 		for (i = 0; i < E1H_FUNC_MAX / 2; i++) {
 			u32 func_config =
 				MF_CFG_RD(bp,
-					  func_mf_config[BP_PORT(bp) + 2 * i].
+					  func_mf_config[BP_PATH(bp) + 2 * i].
 					  config);
 			func_num +=
 				((func_config & FUNC_MF_CFG_FUNC_HIDE) ? 0 : 1);

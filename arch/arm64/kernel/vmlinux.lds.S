@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ld script to make ARM Linux kernel
  * taken from the i386 version by Russell King
@@ -23,6 +24,13 @@ ENTRY(_text)
 
 jiffies = jiffies_64;
 
+
+#define HYPERVISOR_EXTABLE					\
+	. = ALIGN(SZ_8);					\
+	VMLINUX_SYMBOL(__start___kvm_ex_table) = .;		\
+	*(__kvm_ex_table)					\
+	VMLINUX_SYMBOL(__stop___kvm_ex_table) = .;
+
 #define HYPERVISOR_TEXT					\
 	/*						\
 	 * Align to 4 KB so that			\
@@ -38,6 +46,7 @@ jiffies = jiffies_64;
 	VMLINUX_SYMBOL(__hyp_idmap_text_end) = .;	\
 	VMLINUX_SYMBOL(__hyp_text_start) = .;		\
 	*(.hyp.text)					\
+	HYPERVISOR_EXTABLE				\
 	VMLINUX_SYMBOL(__hyp_text_end) = .;
 
 #define IDMAP_TEXT					\
@@ -46,17 +55,33 @@ jiffies = jiffies_64;
 	*(.idmap.text)					\
 	VMLINUX_SYMBOL(__idmap_text_end) = .;
 
+#ifdef CONFIG_HIBERNATION
+#define HIBERNATE_TEXT					\
+	. = ALIGN(SZ_4K);				\
+	VMLINUX_SYMBOL(__hibernate_exit_text_start) = .;\
+	*(.hibernate_exit.text)				\
+	VMLINUX_SYMBOL(__hibernate_exit_text_end) = .;
+#else
+#define HIBERNATE_TEXT
+#endif
+
 #ifdef CONFIG_UNMAP_KERNEL_AT_EL0
 #define TRAMP_TEXT					\
 	. = ALIGN(PAGE_SIZE);				\
 	VMLINUX_SYMBOL(__entry_tramp_text_start) = .;	\
-	*(.entry.tramp.text)				\
+	KEEP(*(.entry.tramp.text))			\
 	. = ALIGN(PAGE_SIZE);				\
 	VMLINUX_SYMBOL(__entry_tramp_text_end) = .;
 #else
 #define TRAMP_TEXT
 #endif
 
+#define RTIC_BSS					\
+	. = ALIGN(PAGE_SIZE);				\
+	VMLINUX_SYMBOL(__bss_rtic_start) = .;	\
+	KEEP(*(.bss.rtic))			\
+	. = ALIGN(PAGE_SIZE);				\
+	VMLINUX_SYMBOL(__bss_rtic_end) = .;
 /*
  * The size of the PE/COFF section that covers the kernel image, which
  * runs from stext to _edata, must be a round multiple of the PE/COFF
@@ -71,17 +96,6 @@ PECOFF_FILE_ALIGNMENT = 0x200;
 	.pecoff_edata_padding : { BYTE(0); . = ALIGN(PECOFF_FILE_ALIGNMENT); }
 #else
 #define PECOFF_EDATA_PADDING
-#endif
-
-#if defined(CONFIG_DEBUG_ALIGN_RODATA)
-#define ALIGN_DEBUG_RO			. = ALIGN(1<<SECTION_SHIFT);
-#define ALIGN_DEBUG_RO_MIN(min)		ALIGN_DEBUG_RO
-#elif defined(CONFIG_DEBUG_RODATA)
-#define ALIGN_DEBUG_RO			. = ALIGN(1<<PAGE_SHIFT);
-#define ALIGN_DEBUG_RO_MIN(min)		ALIGN_DEBUG_RO
-#else
-#define ALIGN_DEBUG_RO
-#define ALIGN_DEBUG_RO_MIN(min)		. = ALIGN(min);
 #endif
 
 SECTIONS
@@ -99,6 +113,8 @@ SECTIONS
 		*(.discard)
 		*(.discard.*)
 		*(.interp .dynamic)
+		*(.dynsym .dynstr .hash .gnu.hash)
+		*(.eh_frame)
 	}
 
 	. = KIMAGE_VADDR + TEXT_OFFSET;
@@ -107,7 +123,6 @@ SECTIONS
 		_text = .;
 		HEAD_TEXT
 	}
-	ALIGN_DEBUG_RO_MIN(PAGE_SIZE)
 	.text : {			/* Real text segment		*/
 		_stext = .;		/* Text and read-only data	*/
 			__exception_text_start = .;
@@ -115,11 +130,15 @@ SECTIONS
 			__exception_text_end = .;
 			IRQENTRY_TEXT
 			SOFTIRQENTRY_TEXT
+			ENTRY_TEXT
 			TEXT_TEXT
 			SCHED_TEXT
+			CPUIDLE_TEXT
 			LOCK_TEXT
+			KPROBES_TEXT
 			HYPERVISOR_TEXT
 			IDMAP_TEXT
+			HIBERNATE_TEXT
 			TRAMP_TEXT
 			*(.fixup)
 			*(.gnu.warning)
@@ -127,20 +146,32 @@ SECTIONS
 		*(.got)			/* Global offset table		*/
 	}
 
-	ALIGN_DEBUG_RO_MIN(PAGE_SIZE)
+	. = ALIGN(SEGMENT_ALIGN);
 	_etext = .;			/* End of text section */
 
 	RO_DATA(PAGE_SIZE)		/* everything from this point to     */
 	EXCEPTION_TABLE(8)		/* __init_begin will be marked RO NX */
 	NOTES
 
-	ALIGN_DEBUG_RO_MIN(PAGE_SIZE)
+	. = ALIGN(SEGMENT_ALIGN);
 	__init_begin = .;
+	__inittext_begin = .;
 
 	INIT_TEXT_SECTION(8)
 	.exit.text : {
 		ARM_EXIT_KEEP(EXIT_TEXT)
 	}
+
+	. = ALIGN(4);
+	.altinstructions : {
+		__alt_instructions = .;
+		KEEP(*(.altinstructions))
+		__alt_instructions_end = .;
+	}
+
+	. = ALIGN(PAGE_SIZE);
+	__inittext_end = .;
+	__initdata_begin = .;
 
 	.init.data : {
 		INIT_DATA
@@ -149,6 +180,7 @@ SECTIONS
 		CON_INITCALL
 		SECURITY_INITCALL
 		INIT_RAM_FS
+		*(.init.rodata.* .init.bss)	/* from the EFI stub */
 	}
 	.exit.data : {
 		ARM_EXIT_KEEP(EXIT_DATA)
@@ -156,38 +188,41 @@ SECTIONS
 
 	PERCPU_SECTION(L1_CACHE_BYTES)
 
-	. = ALIGN(4);
-	.altinstructions : {
-		__alt_instructions = .;
-		*(.altinstructions)
-		__alt_instructions_end = .;
-	}
-	.altinstr_replacement : {
-		*(.altinstr_replacement)
-	}
-	.rela : ALIGN(8) {
-		__reloc_start = .;
+	.rela.dyn : ALIGN(8) {
 		*(.rela .rela*)
-		__reloc_end = .;
-	}
-	.dynsym : ALIGN(8) {
-		__dynsym_start = .;
-		*(.dynsym)
-	}
-	.dynstr : {
-		*(.dynstr)
-	}
-	.hash : {
-		*(.hash)
 	}
 
-	. = ALIGN(PAGE_SIZE);
+	__rela_offset	= ABSOLUTE(ADDR(.rela.dyn) - KIMAGE_VADDR);
+	__rela_size	= SIZEOF(.rela.dyn);
+
+	. = ALIGN(SEGMENT_ALIGN);
+	__initdata_end = .;
 	__init_end = .;
 
 	_data = .;
 	_sdata = .;
-	RW_DATA_SECTION(L1_CACHE_BYTES, PAGE_SIZE, THREAD_SIZE)
+	RW_DATA_SECTION(L1_CACHE_BYTES, PAGE_SIZE, THREAD_ALIGN)
+
+	/*
+	 * Data written with the MMU off but read with the MMU on requires
+	 * cache lines to be invalidated, discarding up to a Cache Writeback
+	 * Granule (CWG) of data from the cache. Keep the section that
+	 * requires this type of maintenance to be in its own Cache Writeback
+	 * Granule (CWG) area so the cache maintenance operations don't
+	 * interfere with adjacent data.
+	 */
+	.mmuoff.data.write : ALIGN(SZ_2K) {
+		__mmuoff_data_start = .;
+		*(.mmuoff.data.write)
+	}
+	. = ALIGN(SZ_2K);
+	.mmuoff.data.read : {
+		*(.mmuoff.data.read)
+		__mmuoff_data_end = .;
+	}
+
 	PECOFF_EDATA_PADDING
+	__pecoff_data_rawsize = ABSOLUTE(. - __initdata_begin);
 	_edata = .;
 
 	BSS_SECTION(0, 0, 0)
@@ -208,11 +243,16 @@ SECTIONS
 	. += PAGE_SIZE;
 #endif
 
+	__pecoff_data_size = ABSOLUTE(. - __initdata_begin);
 	_end = .;
 
 	STABS_DEBUG
 
 	HEAD_SYMBOLS
+
+	.bss : {			/* bss segment		*/
+         RTIC_BSS
+	}
 }
 
 /*
@@ -223,7 +263,10 @@ ASSERT(__hyp_idmap_text_end - (__hyp_idmap_text_start & ~(SZ_4K - 1)) <= SZ_4K,
 	"HYP init code too big or misaligned")
 ASSERT(__idmap_text_end - (__idmap_text_start & ~(SZ_4K - 1)) <= SZ_4K,
 	"ID map text too big or misaligned")
-
+#ifdef CONFIG_HIBERNATION
+ASSERT(__hibernate_exit_text_end - (__hibernate_exit_text_start & ~(SZ_4K - 1))
+	<= SZ_4K, "Hibernate exit text too big or misaligned")
+#endif
 #ifdef CONFIG_UNMAP_KERNEL_AT_EL0
 ASSERT((__entry_tramp_text_end - __entry_tramp_text_start) == PAGE_SIZE,
 	"Entry trampoline text too big")

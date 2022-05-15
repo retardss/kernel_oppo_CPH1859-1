@@ -256,8 +256,6 @@ static const struct clk_muxing_soc_desc kirkwood_mux_desc[] __initconst = {
 		11, 1, 0 },
 };
 
-#define to_clk_mux(_hw) container_of(_hw, struct clk_mux, hw)
-
 static struct clk *clk_muxing_get_src(
 	struct of_phandle_args *clkspec, void *data)
 {
@@ -335,6 +333,8 @@ static void __init kirkwood_clk_init(struct device_node *np)
 	if (cgnp) {
 		mvebu_clk_gating_setup(cgnp, kirkwood_gating_desc);
 		kirkwood_clk_muxing_setup(cgnp, kirkwood_mux_desc);
+
+		of_node_put(cgnp);
 	}
 }
 CLK_OF_DECLARE(kirkwood_clk, "marvell,kirkwood-core-clock",

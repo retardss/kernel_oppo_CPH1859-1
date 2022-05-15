@@ -32,6 +32,9 @@ static void tcp_gso_tstamp(struct sk_buff *skb, unsigned int ts_seq,
 static struct sk_buff *tcp4_gso_segment(struct sk_buff *skb,
 					netdev_features_t features)
 {
+	if (!(skb_shinfo(skb)->gso_type & SKB_GSO_TCPV4))
+		return ERR_PTR(-EINVAL);
+
 	if (!pskb_may_pull(skb, sizeof(struct tcphdr)))
 		return ERR_PTR(-EINVAL);
 
@@ -83,23 +86,6 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 
 	if (skb_gso_ok(skb, features | NETIF_F_GSO_ROBUST)) {
 		/* Packet is from an untrusted source, reset gso_segs. */
-		int type = skb_shinfo(skb)->gso_type;
-
-		if (unlikely(type &
-			     ~(SKB_GSO_TCPV4 |
-			       SKB_GSO_DODGY |
-			       SKB_GSO_TCP_ECN |
-			       SKB_GSO_TCPV6 |
-			       SKB_GSO_GRE |
-			       SKB_GSO_GRE_CSUM |
-			       SKB_GSO_IPIP |
-			       SKB_GSO_SIT |
-			       SKB_GSO_UDP_TUNNEL |
-			       SKB_GSO_UDP_TUNNEL_CSUM |
-			       SKB_GSO_TUNNEL_REMCSUM |
-			       0) ||
-			     !(type & (SKB_GSO_TCPV4 | SKB_GSO_TCPV6))))
-			goto out;
 
 		skb_shinfo(skb)->gso_segs = DIV_ROUND_UP(skb->len, mss);
 
@@ -119,6 +105,13 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	/* Only first segment might have ooo_okay set */
 	segs->ooo_okay = ooo_okay;
 
+	/* GSO partial and frag_list segmentation only requires splitting
+	 * the frame into an MSS multiple and possibly a remainder, both
+	 * cases return a GSO skb. So update the mss now.
+	 */
+	if (skb_is_gso(segs))
+		mss *= skb_shinfo(segs)->gso_segs;
+
 	delta = htonl(oldlen + (thlen + mss));
 
 	skb = segs;
@@ -131,11 +124,13 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	newcheck = ~csum_fold((__force __wsum)((__force u32)th->check +
 					       (__force u32)delta));
 
-	do {
+	while (skb->next) {
 		th->fin = th->psh = 0;
 		th->check = newcheck;
 
-		if (skb->ip_summed != CHECKSUM_PARTIAL)
+		if (skb->ip_summed == CHECKSUM_PARTIAL)
+			gso_reset_checksum(skb, ~th->check);
+		else
 			th->check = gso_make_checksum(skb, ~th->check);
 
 		seq += mss;
@@ -149,7 +144,7 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 
 		th->seq = htonl(seq);
 		th->cwr = 0;
-	} while (skb->next);
+	}
 
 	/* Following permits TCP Small Queues to work well with GSO :
 	 * The callback to TCP stack will be called at the time last frag
@@ -157,11 +152,19 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	 * is freed by GSO engine
 	 */
 	if (copy_destructor) {
+		int delta;
+
 		swap(gso_skb->sk, skb->sk);
 		swap(gso_skb->destructor, skb->destructor);
 		sum_truesize += skb->truesize;
-		atomic_add(sum_truesize - gso_skb->truesize,
-			   &skb->sk->sk_wmem_alloc);
+		delta = sum_truesize - gso_skb->truesize;
+		/* In some pathological cases, delta can be negative.
+		 * We need to either use refcount_add() or refcount_sub_and_test()
+		 */
+		if (likely(delta >= 0))
+			refcount_add(delta, &skb->sk->sk_wmem_alloc);
+		else
+			WARN_ON_ONCE(refcount_sub_and_test(-delta, &skb->sk->sk_wmem_alloc));
 	}
 
 	delta = htonl(oldlen + (skb_tail_pointer(skb) -
@@ -169,7 +172,9 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 		      skb->data_len);
 	th->check = ~csum_fold((__force __wsum)((__force u32)th->check +
 				(__force u32)delta));
-	if (skb->ip_summed != CHECKSUM_PARTIAL)
+	if (skb->ip_summed == CHECKSUM_PARTIAL)
+		gso_reset_checksum(skb, ~th->check);
+	else
 		th->check = gso_make_checksum(skb, ~th->check);
 out:
 	return segs;

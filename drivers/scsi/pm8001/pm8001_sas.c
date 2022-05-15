@@ -280,7 +280,10 @@ u32 pm8001_get_ncq_tag(struct sas_task *task, u32 *tag)
 	struct ata_queued_cmd *qc = task->uldd_task;
 	if (qc) {
 		if (qc->tf.command == ATA_CMD_FPDMA_WRITE ||
-			qc->tf.command == ATA_CMD_FPDMA_READ) {
+		    qc->tf.command == ATA_CMD_FPDMA_READ ||
+		    qc->tf.command == ATA_CMD_FPDMA_RECV ||
+		    qc->tf.command == ATA_CMD_FPDMA_SEND ||
+		    qc->tf.command == ATA_CMD_NCQ_NON_DATA) {
 			*tag = qc->tag;
 			return 1;
 		}
@@ -371,6 +374,13 @@ static int pm8001_task_exec(struct sas_task *task,
 		return 0;
 	}
 	pm8001_ha = pm8001_find_ha_by_dev(task->dev);
+	if (pm8001_ha->controller_fatal_error) {
+		struct task_status_struct *ts = &t->task_status;
+
+		ts->resp = SAS_TASK_UNDELIVERED;
+		t->task_done(t);
+		return 0;
+	}
 	PM8001_IO_DBG(pm8001_ha, pm8001_printk("pm8001_task_exec device \n "));
 	spin_lock_irqsave(&pm8001_ha->lock, flags);
 	do {
@@ -463,7 +473,7 @@ err_out:
 	dev_printk(KERN_ERR, pm8001_ha->dev, "pm8001 exec failed[%d]!\n", rc);
 	if (!sas_protocol_ata(t->task_proto))
 		if (n_elem)
-			dma_unmap_sg(pm8001_ha->dev, t->scatter, n_elem,
+			dma_unmap_sg(pm8001_ha->dev, t->scatter, t->num_scatter,
 				t->data_dir);
 out_done:
 	spin_unlock_irqrestore(&pm8001_ha->lock, flags);
@@ -524,7 +534,7 @@ void pm8001_ccb_task_free(struct pm8001_hba_info *pm8001_ha,
   * pm8001_alloc_dev - find a empty pm8001_device
   * @pm8001_ha: our hba card information
   */
-struct pm8001_device *pm8001_alloc_dev(struct pm8001_hba_info *pm8001_ha)
+static struct pm8001_device *pm8001_alloc_dev(struct pm8001_hba_info *pm8001_ha)
 {
 	u32 dev;
 	for (dev = 0; dev < PM8001_MAX_DEVICES; dev++) {
@@ -785,7 +795,7 @@ pm8001_exec_internal_task_abort(struct pm8001_hba_info *pm8001_ha,
 
 		res = pm8001_tag_alloc(pm8001_ha, &ccb_tag);
 		if (res)
-			return res;
+			goto ex_err;
 		ccb = &pm8001_ha->ccb_info[ccb_tag];
 		ccb->device = pm8001_dev;
 		ccb->ccb_tag = ccb_tag;

@@ -30,7 +30,7 @@
 #include <linux/export.h>
 #include <linux/sizes.h>
 
-#include <video/omapdss.h>
+#include <video/omapfb_dss.h>
 #include <video/omapvrfb.h>
 
 #include "omapfb.h"
@@ -608,6 +608,8 @@ int omapfb_ioctl(struct fb_info *fbi, unsigned int cmd, unsigned long arg)
 	} p;
 
 	int r = 0;
+
+	memset(&p, 0, sizeof(p));
 
 	switch (cmd) {
 	case OMAPFB_SYNC_GFX:

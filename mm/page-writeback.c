@@ -36,6 +36,7 @@
 #include <linux/pagevec.h>
 #include <linux/timer.h>
 #include <linux/sched/rt.h>
+#include <linux/sched/signal.h>
 #include <linux/mm_inline.h>
 #include <trace/events/writeback.h>
 #include <mt-plat/mtk_blocktag.h>
@@ -201,11 +202,11 @@ static void wb_min_max_ratio(struct bdi_writeback *wb,
 	if (this_bw < tot_bw) {
 		if (min) {
 			min *= this_bw;
-			do_div(min, tot_bw);
+			min = div64_ul(min, tot_bw);
 		}
 		if (max < 100) {
 			max *= this_bw;
-			do_div(max, tot_bw);
+			max = div64_ul(max, tot_bw);
 		}
 	}
 
@@ -268,21 +269,35 @@ static void wb_min_max_ratio(struct bdi_writeback *wb,
  */
 
 /**
- * zone_dirtyable_memory - number of dirtyable pages in a zone
- * @zone: the zone
+ * node_dirtyable_memory - number of dirtyable pages in a node
+ * @pgdat: the node
  *
- * Returns the zone's number of pages potentially available for dirty
- * page cache.  This is the base value for the per-zone dirty limits.
+ * Returns the node's number of pages potentially available for dirty
+ * page cache.  This is the base value for the per-node dirty limits.
  */
-static unsigned long zone_dirtyable_memory(struct zone *zone)
+static unsigned long node_dirtyable_memory(struct pglist_data *pgdat)
 {
-	unsigned long nr_pages;
+	unsigned long nr_pages = 0;
+	int z;
 
-	nr_pages = zone_page_state(zone, NR_FREE_PAGES);
-	nr_pages -= min(nr_pages, zone->dirty_balance_reserve);
+	for (z = 0; z < MAX_NR_ZONES; z++) {
+		struct zone *zone = pgdat->node_zones + z;
 
-	nr_pages += zone_page_state(zone, NR_INACTIVE_FILE);
-	nr_pages += zone_page_state(zone, NR_ACTIVE_FILE);
+		if (!populated_zone(zone))
+			continue;
+
+		nr_pages += zone_page_state(zone, NR_FREE_PAGES);
+	}
+
+	/*
+	 * Pages reserved for the kernel should not be considered
+	 * dirtyable, to prevent a situation where reclaim has to
+	 * clean pages in order to balance the zones.
+	 */
+	nr_pages -= min(nr_pages, pgdat->totalreserve_pages);
+
+	nr_pages += node_page_state(pgdat, NR_INACTIVE_FILE);
+	nr_pages += node_page_state(pgdat, NR_ACTIVE_FILE);
 
 	return nr_pages;
 }
@@ -292,12 +307,29 @@ static unsigned long highmem_dirtyable_memory(unsigned long total)
 #ifdef CONFIG_HIGHMEM
 	int node;
 	unsigned long x = 0;
+	int i;
 
 	for_each_node_state(node, N_HIGH_MEMORY) {
-		struct zone *z = &NODE_DATA(node)->node_zones[ZONE_HIGHMEM];
+		for (i = ZONE_NORMAL + 1; i < MAX_NR_ZONES; i++) {
+			struct zone *z;
+			unsigned long nr_pages;
 
-		x += zone_dirtyable_memory(z);
+			if (!is_highmem_idx(i))
+				continue;
+
+			z = &NODE_DATA(node)->node_zones[i];
+			if (!populated_zone(z))
+				continue;
+
+			nr_pages = zone_page_state(z, NR_FREE_PAGES);
+			/* watch for underflows */
+			nr_pages -= min(nr_pages, high_wmark_pages(z));
+			nr_pages += zone_page_state(z, NR_ZONE_INACTIVE_FILE);
+			nr_pages += zone_page_state(z, NR_ZONE_ACTIVE_FILE);
+			x += nr_pages;
+		}
 	}
+
 	/*
 	 * Unreclaimable memory (kernel memory or anonymous memory
 	 * without swap) can bring down the dirtyable pages below
@@ -332,11 +364,16 @@ static unsigned long global_dirtyable_memory(void)
 {
 	unsigned long x;
 
-	x = global_page_state(NR_FREE_PAGES);
-	x -= min(x, dirty_balance_reserve);
+	x = global_zone_page_state(NR_FREE_PAGES);
+	/*
+	 * Pages reserved for the kernel should not be considered
+	 * dirtyable, to prevent a situation where reclaim has to
+	 * clean pages in order to balance the zones.
+	 */
+	x -= min(x, totalreserve_pages);
 
-	x += global_page_state(NR_INACTIVE_FILE);
-	x += global_page_state(NR_ACTIVE_FILE);
+	x += global_node_page_state(NR_INACTIVE_FILE);
+	x += global_node_page_state(NR_ACTIVE_FILE);
 
 	if (!vm_highmem_is_dirtyable)
 		x -= highmem_dirtyable_memory(x);
@@ -401,8 +438,8 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 		bg_thresh = thresh / 2;
 	tsk = current;
 	if (tsk->flags & PF_LESS_THROTTLE || rt_task(tsk)) {
-		bg_thresh += bg_thresh / 4;
-		thresh += thresh / 4;
+		bg_thresh += bg_thresh / 4 + global_wb_domain.dirty_limit / 32;
+		thresh += thresh / 4 + global_wb_domain.dirty_limit / 32;
 	}
 	dtc->thresh = thresh;
 	dtc->bg_thresh = bg_thresh;
@@ -432,23 +469,23 @@ void global_dirty_limits(unsigned long *pbackground, unsigned long *pdirty)
 }
 
 /**
- * zone_dirty_limit - maximum number of dirty pages allowed in a zone
- * @zone: the zone
+ * node_dirty_limit - maximum number of dirty pages allowed in a node
+ * @pgdat: the node
  *
- * Returns the maximum number of dirty pages allowed in a zone, based
- * on the zone's dirtyable memory.
+ * Returns the maximum number of dirty pages allowed in a node, based
+ * on the node's dirtyable memory.
  */
-static unsigned long zone_dirty_limit(struct zone *zone)
+static unsigned long node_dirty_limit(struct pglist_data *pgdat)
 {
-	unsigned long zone_memory = zone_dirtyable_memory(zone);
+	unsigned long node_memory = node_dirtyable_memory(pgdat);
 	struct task_struct *tsk = current;
 	unsigned long dirty;
 
 	if (vm_dirty_bytes)
 		dirty = DIV_ROUND_UP(vm_dirty_bytes, PAGE_SIZE) *
-			zone_memory / global_dirtyable_memory();
+			node_memory / global_dirtyable_memory();
 	else
-		dirty = vm_dirty_ratio * zone_memory / 100;
+		dirty = vm_dirty_ratio * node_memory / 100;
 
 	if (tsk->flags & PF_LESS_THROTTLE || rt_task(tsk))
 		dirty += dirty / 4;
@@ -457,19 +494,22 @@ static unsigned long zone_dirty_limit(struct zone *zone)
 }
 
 /**
- * zone_dirty_ok - tells whether a zone is within its dirty limits
- * @zone: the zone to check
+ * node_dirty_ok - tells whether a node is within its dirty limits
+ * @pgdat: the node to check
  *
- * Returns %true when the dirty pages in @zone are within the zone's
+ * Returns %true when the dirty pages in @pgdat are within the node's
  * dirty limit, %false if the limit is exceeded.
  */
-bool zone_dirty_ok(struct zone *zone)
+bool node_dirty_ok(struct pglist_data *pgdat)
 {
-	unsigned long limit = zone_dirty_limit(zone);
+	unsigned long limit = node_dirty_limit(pgdat);
+	unsigned long nr_pages = 0;
 
-	return zone_page_state(zone, NR_FILE_DIRTY) +
-	       zone_page_state(zone, NR_UNSTABLE_NFS) +
-	       zone_page_state(zone, NR_WRITEBACK) <= limit;
+	nr_pages += node_page_state(pgdat, NR_FILE_DIRTY);
+	nr_pages += node_page_state(pgdat, NR_UNSTABLE_NFS);
+	nr_pages += node_page_state(pgdat, NR_WRITEBACK);
+
+	return nr_pages <= limit;
 }
 
 int dirty_background_ratio_handler(struct ctl_table *table, int write,
@@ -542,7 +582,7 @@ static void wb_domain_writeout_inc(struct wb_domain *dom,
 	__fprop_inc_percpu_max(&dom->completions, completions,
 			       max_prop_frac);
 	/* First event after period switching was turned off? */
-	if (!unlikely(dom->period_time)) {
+	if (unlikely(!dom->period_time)) {
 		/*
 		 * We can race with other __bdi_writeout_inc calls here but
 		 * it does not cause any harm since the resulting time when
@@ -562,7 +602,7 @@ static inline void __wb_writeout_inc(struct bdi_writeback *wb)
 {
 	struct wb_domain *cgdom;
 
-	__inc_wb_stat(wb, WB_WRITTEN);
+	inc_wb_stat(wb, WB_WRITTEN);
 	wb_domain_writeout_inc(&global_wb_domain, &wb->completions,
 			       wb->bdi->max_prop_frac);
 
@@ -611,9 +651,8 @@ int wb_domain_init(struct wb_domain *dom, gfp_t gfp)
 
 	spin_lock_init(&dom->lock);
 
-	init_timer_deferrable(&dom->period_timer);
-	dom->period_timer.function = writeout_period;
-	dom->period_timer.data = (unsigned long)dom;
+	setup_deferrable_timer(&dom->period_timer, writeout_period,
+			       (unsigned long)dom);
 
 	dom->dirty_limit_tstamp = jiffies;
 
@@ -1367,7 +1406,7 @@ void wb_update_bandwidth(struct bdi_writeback *wb, unsigned long start_time)
  * will look to see if it needs to start dirty throttling.
  *
  * If dirty_poll_interval is too low, big NUMA machines will call the expensive
- * global_page_state() too often. So scale it near-sqrt to the safety margin
+ * global_zone_page_state() too often. So scale it near-sqrt to the safety margin
  * (the number of pages we may dirty without exceeding the dirty limits).
  */
 static unsigned long dirty_poll_interval(unsigned long dirty,
@@ -1557,10 +1596,10 @@ static void balance_dirty_pages(struct address_space *mapping,
 		 * written to the server's write cache, but has not yet
 		 * been flushed to permanent storage.
 		 */
-		nr_reclaimable = global_page_state(NR_FILE_DIRTY) +
-					global_page_state(NR_UNSTABLE_NFS);
+		nr_reclaimable = global_node_page_state(NR_FILE_DIRTY) +
+					global_node_page_state(NR_UNSTABLE_NFS);
 		gdtc->avail = global_dirtyable_memory();
-		gdtc->dirty = nr_reclaimable + global_page_state(NR_WRITEBACK);
+		gdtc->dirty = nr_reclaimable + global_node_page_state(NR_WRITEBACK);
 
 		domain_dirty_limits(gdtc);
 
@@ -1740,6 +1779,7 @@ pause:
 					  pause,
 					  start_time);
 		__set_current_state(TASK_KILLABLE);
+		wb->dirty_sleep = now;
 		io_schedule_timeout(pause);
 
 		current->dirty_paused_when = now + pause;
@@ -1758,7 +1798,7 @@ pause:
 		 * pages exceeds dirty_thresh, give the other good wb's a pipe
 		 * to go through, so that tasks on them still remain responsive.
 		 *
-		 * In theory 1 page is enough to keep the comsumer-producer
+		 * In theory 1 page is enough to keep the consumer-producer
 		 * pipe going: the flusher cleans 1 page => the task dirties 1
 		 * more page. However wb_dirty has accounting errors.  So use
 		 * the larger and more IO friendly wb_stat_error.
@@ -1897,8 +1937,8 @@ bool wb_over_bg_thresh(struct bdi_writeback *wb)
 	 * as we're trying to decide whether to put more under writeback.
 	 */
 	gdtc->avail = global_dirtyable_memory();
-	gdtc->dirty = global_page_state(NR_FILE_DIRTY) +
-		      global_page_state(NR_UNSTABLE_NFS);
+	gdtc->dirty = global_node_page_state(NR_FILE_DIRTY) +
+		      global_node_page_state(NR_UNSTABLE_NFS);
 	domain_dirty_limits(gdtc);
 
 	if (gdtc->dirty > gdtc->bg_thresh)
@@ -1928,60 +1968,6 @@ bool wb_over_bg_thresh(struct bdi_writeback *wb)
 }
 
 /*
- * Check vmstat snapshot for throttling of vm_writeout
- */
-static unsigned long check_vm_writeout_snapshot(void)
-{
-	struct zone *z;
-	unsigned long nr_vm_writeout = 0;
-
-	for_each_populated_zone(z) {
-		nr_vm_writeout += zone_page_state_snapshot(z, NR_WRITEBACK);
-		nr_vm_writeout += zone_page_state_snapshot(z, NR_UNSTABLE_NFS);
-	}
-
-	return nr_vm_writeout;
-}
-
-void throttle_vm_writeout(gfp_t gfp_mask)
-{
-	unsigned long background_thresh;
-	unsigned long dirty_thresh;
-
-        for ( ; ; ) {
-		global_dirty_limits(&background_thresh, &dirty_thresh);
-		dirty_thresh = hard_dirty_limit(&global_wb_domain, dirty_thresh);
-
-                /*
-                 * Boost the allowable dirty threshold a bit for page
-                 * allocators so they don't get DoS'ed by heavy writers
-                 */
-                dirty_thresh += dirty_thresh / 10;      /* wheeee... */
-
-                if (global_page_state(NR_UNSTABLE_NFS) +
-			global_page_state(NR_WRITEBACK) <= dirty_thresh)
-                        	break;
-
-		/*
-		 * Take a deeper look at NR_WRITEBACK & NR_UNSTABLE_NFS
-		 * before entering congestion_wait.
-		 */
-		if (check_vm_writeout_snapshot() <= dirty_thresh)
-			break;
-
-                congestion_wait(BLK_RW_ASYNC, HZ/10);
-
-		/*
-		 * The caller might hold locks which can prevent IO completion
-		 * or progress in the filesystem.  So we cannot just sit here
-		 * waiting for IO to complete.
-		 */
-		if ((gfp_mask & (__GFP_FS|__GFP_IO)) != (__GFP_FS|__GFP_IO))
-			break;
-        }
-}
-
-/*
  * sysctl handler for /proc/sys/vm/dirty_writeback_centisecs
  */
 int dirty_writeback_centisecs_handler(struct ctl_table *table, int write,
@@ -1995,8 +1981,8 @@ int dirty_writeback_centisecs_handler(struct ctl_table *table, int write,
 void laptop_mode_timer_fn(unsigned long data)
 {
 	struct request_queue *q = (struct request_queue *)data;
-	int nr_pages = global_page_state(NR_FILE_DIRTY) +
-		global_page_state(NR_UNSTABLE_NFS);
+	int nr_pages = global_node_page_state(NR_FILE_DIRTY) +
+		global_node_page_state(NR_UNSTABLE_NFS);
 	struct bdi_writeback *wb;
 
 	/*
@@ -2066,25 +2052,11 @@ void writeback_set_ratelimit(void)
 		ratelimit_pages = 16;
 }
 
-static int
-ratelimit_handler(struct notifier_block *self, unsigned long action,
-		  void *hcpu)
+static int page_writeback_cpu_online(unsigned int cpu)
 {
-
-	switch (action & ~CPU_TASKS_FROZEN) {
-	case CPU_ONLINE:
-	case CPU_DEAD:
-		writeback_set_ratelimit();
-		return NOTIFY_OK;
-	default:
-		return NOTIFY_DONE;
-	}
+	writeback_set_ratelimit();
+	return 0;
 }
-
-static struct notifier_block ratelimit_nb = {
-	.notifier_call	= ratelimit_handler,
-	.next		= NULL,
-};
 
 /*
  * Called early on to tune the page writeback dirty limits.
@@ -2108,8 +2080,10 @@ void __init page_writeback_init(void)
 {
 	BUG_ON(wb_domain_init(&global_wb_domain, GFP_KERNEL));
 
-	writeback_set_ratelimit();
-	register_cpu_notifier(&ratelimit_nb);
+	cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "mm/writeback:online",
+			  page_writeback_cpu_online, NULL);
+	cpuhp_setup_state(CPUHP_MM_WRITEBACK_DEAD, "mm/writeback:dead", NULL,
+			  page_writeback_cpu_online);
 }
 
 /**
@@ -2133,18 +2107,26 @@ void tag_pages_for_writeback(struct address_space *mapping,
 			     pgoff_t start, pgoff_t end)
 {
 #define WRITEBACK_TAG_BATCH 4096
-	unsigned long tagged;
+	unsigned long tagged = 0;
+	struct radix_tree_iter iter;
+	void **slot;
 
-	do {
-		spin_lock_irq(&mapping->tree_lock);
-		tagged = radix_tree_range_tag_if_tagged(&mapping->page_tree,
-				&start, end, WRITEBACK_TAG_BATCH,
-				PAGECACHE_TAG_DIRTY, PAGECACHE_TAG_TOWRITE);
+	spin_lock_irq(&mapping->tree_lock);
+	radix_tree_for_each_tagged(slot, &mapping->page_tree, &iter, start,
+							PAGECACHE_TAG_DIRTY) {
+		if (iter.index > end)
+			break;
+		radix_tree_iter_tag_set(&mapping->page_tree, &iter,
+							PAGECACHE_TAG_TOWRITE);
+		tagged++;
+		if ((tagged % WRITEBACK_TAG_BATCH) != 0)
+			continue;
+		slot = radix_tree_iter_resume(slot, &iter);
 		spin_unlock_irq(&mapping->tree_lock);
-		WARN_ON_ONCE(tagged > WRITEBACK_TAG_BATCH);
 		cond_resched();
-		/* We check 'start' to handle wrapping when end == ~0UL */
-	} while (tagged >= WRITEBACK_TAG_BATCH && start);
+		spin_lock_irq(&mapping->tree_lock);
+	}
+	spin_unlock_irq(&mapping->tree_lock);
 }
 EXPORT_SYMBOL(tag_pages_for_writeback);
 
@@ -2169,6 +2151,13 @@ EXPORT_SYMBOL(tag_pages_for_writeback);
  * not miss some pages (e.g., because some other process has cleared TOWRITE
  * tag we set). The rule we follow is that TOWRITE tag can be cleared only
  * by the process clearing the DIRTY tag (and submitting the page for IO).
+ *
+ * To avoid deadlocks between range_cyclic writeback and callers that hold
+ * pages in PageWriteback to aggregate IO until write_cache_pages() returns,
+ * we do not loop back to the start of the file. Doing so causes a page
+ * lock/page writeback access order inversion - we should only ever lock
+ * multiple pages in ascending page->index order, and looping back to the start
+ * of the file violates that rule and causes deadlocks.
  */
 int write_cache_pages(struct address_space *mapping,
 		      struct writeback_control *wbc, writepage_t writepage,
@@ -2176,13 +2165,13 @@ int write_cache_pages(struct address_space *mapping,
 {
 	int ret = 0;
 	int done = 0;
+	int error;
 	struct pagevec pvec;
 	int nr_pages;
 	pgoff_t uninitialized_var(writeback_index);
 	pgoff_t index;
 	pgoff_t end;		/* Inclusive */
 	pgoff_t done_index;
-	int cycled;
 	int range_whole = 0;
 	int tag;
 
@@ -2190,23 +2179,17 @@ int write_cache_pages(struct address_space *mapping,
 	if (wbc->range_cyclic) {
 		writeback_index = mapping->writeback_index; /* prev offset */
 		index = writeback_index;
-		if (index == 0)
-			cycled = 1;
-		else
-			cycled = 0;
 		end = -1;
 	} else {
-		index = wbc->range_start >> PAGE_CACHE_SHIFT;
-		end = wbc->range_end >> PAGE_CACHE_SHIFT;
+		index = wbc->range_start >> PAGE_SHIFT;
+		end = wbc->range_end >> PAGE_SHIFT;
 		if (wbc->range_start == 0 && wbc->range_end == LLONG_MAX)
 			range_whole = 1;
-		cycled = 1; /* ignore range_cyclic tests */
 	}
 	if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
 		tag = PAGECACHE_TAG_TOWRITE;
 	else
 		tag = PAGECACHE_TAG_DIRTY;
-retry:
 	if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
 		tag_pages_for_writeback(mapping, index, end);
 	done_index = index;
@@ -2272,25 +2255,31 @@ continue_unlock:
 				goto continue_unlock;
 
 			trace_wbc_writepage(wbc, inode_to_bdi(mapping->host));
-			ret = (*writepage)(page, wbc, data);
-			if (unlikely(ret)) {
-				if (ret == AOP_WRITEPAGE_ACTIVATE) {
+			error = (*writepage)(page, wbc, data);
+			if (unlikely(error)) {
+				/*
+				 * Handle errors according to the type of
+				 * writeback. There's no need to continue for
+				 * background writeback. Just push done_index
+				 * past this page so media errors won't choke
+				 * writeout for the entire file. For integrity
+				 * writeback, we must process the entire dirty
+				 * set regardless of errors because the fs may
+				 * still have state to clear for each page. In
+				 * that case we continue processing and return
+				 * the first error.
+				 */
+				if (error == AOP_WRITEPAGE_ACTIVATE) {
 					unlock_page(page);
-					ret = 0;
-				} else {
-					/*
-					 * done_index is set past this page,
-					 * so media errors will not choke
-					 * background writeout for the entire
-					 * file. This has consequences for
-					 * range_cyclic semantics (ie. it may
-					 * not be suitable for data integrity
-					 * writeout).
-					 */
+					error = 0;
+				} else if (wbc->sync_mode != WB_SYNC_ALL) {
+					ret = error;
 					done_index = page->index + 1;
 					done = 1;
 					break;
 				}
+				if (!ret)
+					ret = error;
 			}
 
 			/*
@@ -2308,17 +2297,14 @@ continue_unlock:
 		pagevec_release(&pvec);
 		cond_resched();
 	}
-	if (!cycled && !done) {
-		/*
-		 * range_cyclic:
-		 * We hit the last page and there is more work to be done: wrap
-		 * back to the start of the file
-		 */
-		cycled = 1;
-		index = 0;
-		end = writeback_index - 1;
-		goto retry;
-	}
+
+	/*
+	 * If we hit the last page and there is more work to be done: wrap
+	 * back the index back to the start of the file for the next
+	 * time we are called.
+	 */
+	if (wbc->range_cyclic && !done)
+		done_index = 0;
 	if (wbc->range_cyclic || (range_whole && wbc->nr_to_write > 0))
 		mapping->writeback_index = done_index;
 
@@ -2371,23 +2357,29 @@ int do_writepages(struct address_space *mapping, struct writeback_control *wbc)
 
 	if (wbc->nr_to_write <= 0)
 		return 0;
-	if (mapping->a_ops->writepages)
-		ret = mapping->a_ops->writepages(mapping, wbc);
-	else
-		ret = generic_writepages(mapping, wbc);
+	while (1) {
+		if (mapping->a_ops->writepages)
+			ret = mapping->a_ops->writepages(mapping, wbc);
+		else
+			ret = generic_writepages(mapping, wbc);
+		if ((ret != -ENOMEM) || (wbc->sync_mode != WB_SYNC_ALL))
+			break;
+		cond_resched();
+		congestion_wait(BLK_RW_ASYNC, HZ/50);
+	}
 	return ret;
 }
 
 /**
- * write_one_page - write out a single page and optionally wait on I/O
+ * write_one_page - write out a single page and wait on I/O
  * @page: the page to write
- * @wait: if true, wait on writeout
  *
  * The page must be locked by the caller and will be unlocked upon return.
  *
- * write_one_page() returns a negative error code if I/O failed.
+ * Note that the mapping's AS_EIO/AS_ENOSPC flags will be cleared when this
+ * function returns.
  */
-int write_one_page(struct page *page, int wait)
+int write_one_page(struct page *page)
 {
 	struct address_space *mapping = page->mapping;
 	int ret = 0;
@@ -2398,21 +2390,20 @@ int write_one_page(struct page *page, int wait)
 
 	BUG_ON(!PageLocked(page));
 
-	if (wait)
-		wait_on_page_writeback(page);
+	wait_on_page_writeback(page);
 
 	if (clear_page_dirty_for_io(page)) {
-		page_cache_get(page);
+		get_page(page);
 		ret = mapping->a_ops->writepage(page, &wbc);
-		if (ret == 0 && wait) {
+		if (ret == 0)
 			wait_on_page_writeback(page);
-			if (PageError(page))
-				ret = -EIO;
-		}
-		page_cache_release(page);
+		put_page(page);
 	} else {
 		unlock_page(page);
 	}
+
+	if (!ret)
+		ret = filemap_check_errors(mapping);
 	return ret;
 }
 EXPORT_SYMBOL(write_one_page);
@@ -2430,12 +2421,11 @@ int __set_page_dirty_no_writeback(struct page *page)
 /*
  * Helper function for set_page_dirty family.
  *
- * Caller must hold mem_cgroup_begin_page_stat().
+ * Caller must hold lock_page_memcg().
  *
  * NOTE: This relies on being atomic wrt interrupts.
  */
-void account_page_dirtied(struct page *page, struct address_space *mapping,
-			  struct mem_cgroup *memcg)
+void account_page_dirtied(struct page *page, struct address_space *mapping)
 {
 	struct inode *inode = mapping->host;
 
@@ -2447,12 +2437,12 @@ void account_page_dirtied(struct page *page, struct address_space *mapping,
 		inode_attach_wb(inode, page);
 		wb = inode_to_wb(inode);
 
-		mem_cgroup_inc_page_stat(memcg, MEM_CGROUP_STAT_DIRTY);
-		__inc_zone_page_state(page, NR_FILE_DIRTY);
-		__inc_zone_page_state(page, NR_DIRTIED);
-		__inc_wb_stat(wb, WB_RECLAIMABLE);
-		__inc_wb_stat(wb, WB_DIRTIED);
-		task_io_account_write(PAGE_CACHE_SIZE);
+		__inc_lruvec_page_state(page, NR_FILE_DIRTY);
+		__inc_zone_page_state(page, NR_ZONE_WRITE_PENDING);
+		__inc_node_page_state(page, NR_DIRTIED);
+		inc_wb_stat(wb, WB_RECLAIMABLE);
+		inc_wb_stat(wb, WB_DIRTIED);
+		task_io_account_write(PAGE_SIZE);
 		current->nr_dirtied++;
 		this_cpu_inc(bdp_ratelimits);
 
@@ -2469,16 +2459,16 @@ EXPORT_SYMBOL(account_page_dirtied);
 /*
  * Helper function for deaccounting dirty page without writeback.
  *
- * Caller must hold mem_cgroup_begin_page_stat().
+ * Caller must hold lock_page_memcg().
  */
 void account_page_cleaned(struct page *page, struct address_space *mapping,
-			  struct mem_cgroup *memcg, struct bdi_writeback *wb)
+			  struct bdi_writeback *wb)
 {
 	if (mapping_cap_account_dirty(mapping)) {
-		mem_cgroup_dec_page_stat(memcg, MEM_CGROUP_STAT_DIRTY);
-		dec_zone_page_state(page, NR_FILE_DIRTY);
+		dec_lruvec_page_state(page, NR_FILE_DIRTY);
+		dec_zone_page_state(page, NR_ZONE_WRITE_PENDING);
 		dec_wb_stat(wb, WB_RECLAIMABLE);
-		task_io_account_cancelled_write(PAGE_CACHE_SIZE);
+		task_io_account_cancelled_write(PAGE_SIZE);
 	}
 }
 
@@ -2496,26 +2486,24 @@ void account_page_cleaned(struct page *page, struct address_space *mapping,
  */
 int __set_page_dirty_nobuffers(struct page *page)
 {
-	struct mem_cgroup *memcg;
-
-	memcg = mem_cgroup_begin_page_stat(page);
+	lock_page_memcg(page);
 	if (!TestSetPageDirty(page)) {
 		struct address_space *mapping = page_mapping(page);
 		unsigned long flags;
 
 		if (!mapping) {
-			mem_cgroup_end_page_stat(memcg);
+			unlock_page_memcg(page);
 			return 1;
 		}
 
 		spin_lock_irqsave(&mapping->tree_lock, flags);
 		BUG_ON(page_mapping(page) != mapping);
 		WARN_ON_ONCE(!PagePrivate(page) && !PageUptodate(page));
-		account_page_dirtied(page, mapping, memcg);
+		account_page_dirtied(page, mapping);
 		radix_tree_tag_set(&mapping->page_tree, page_index(page),
 				   PAGECACHE_TAG_DIRTY);
 		spin_unlock_irqrestore(&mapping->tree_lock, flags);
-		mem_cgroup_end_page_stat(memcg);
+		unlock_page_memcg(page);
 
 		if (mapping->host) {
 			/* !PageAnon && !swapper_space */
@@ -2523,7 +2511,7 @@ int __set_page_dirty_nobuffers(struct page *page)
 		}
 		return 1;
 	}
-	mem_cgroup_end_page_stat(memcg);
+	unlock_page_memcg(page);
 	return 0;
 }
 EXPORT_SYMBOL(__set_page_dirty_nobuffers);
@@ -2546,7 +2534,7 @@ void account_page_redirty(struct page *page)
 
 		wb = unlocked_inode_to_wb_begin(inode, &cookie);
 		current->nr_dirtied--;
-		dec_zone_page_state(page, NR_DIRTIED);
+		dec_node_page_state(page, NR_DIRTIED);
 		dec_wb_stat(wb, WB_DIRTIED);
 		unlocked_inode_to_wb_end(inode, &cookie);
 	}
@@ -2584,6 +2572,7 @@ int set_page_dirty(struct page *page)
 {
 	struct address_space *mapping = page_mapping(page);
 
+	page = compound_head(page);
 	if (likely(mapping)) {
 		int (*spd)(struct page *) = mapping->a_ops->set_page_dirty;
 		/*
@@ -2653,17 +2642,16 @@ void cancel_dirty_page(struct page *page)
 	if (mapping_cap_account_dirty(mapping)) {
 		struct inode *inode = mapping->host;
 		struct bdi_writeback *wb;
-		struct mem_cgroup *memcg;
 		struct wb_lock_cookie cookie = {};
 
-		memcg = mem_cgroup_begin_page_stat(page);
+		lock_page_memcg(page);
 		wb = unlocked_inode_to_wb_begin(inode, &cookie);
 
 		if (TestClearPageDirty(page))
-			account_page_cleaned(page, mapping, memcg, wb);
+			account_page_cleaned(page, mapping, wb);
 
 		unlocked_inode_to_wb_end(inode, &cookie);
-		mem_cgroup_end_page_stat(memcg);
+		unlock_page_memcg(page);
 	} else {
 		ClearPageDirty(page);
 	}
@@ -2694,7 +2682,6 @@ int clear_page_dirty_for_io(struct page *page)
 	if (mapping && mapping_cap_account_dirty(mapping)) {
 		struct inode *inode = mapping->host;
 		struct bdi_writeback *wb;
-		struct mem_cgroup *memcg;
 		struct wb_lock_cookie cookie = {};
 
 		/*
@@ -2732,16 +2719,14 @@ int clear_page_dirty_for_io(struct page *page)
 		 * always locked coming in here, so we get the desired
 		 * exclusion.
 		 */
-		memcg = mem_cgroup_begin_page_stat(page);
 		wb = unlocked_inode_to_wb_begin(inode, &cookie);
 		if (TestClearPageDirty(page)) {
-			mem_cgroup_dec_page_stat(memcg, MEM_CGROUP_STAT_DIRTY);
-			dec_zone_page_state(page, NR_FILE_DIRTY);
+			dec_lruvec_page_state(page, NR_FILE_DIRTY);
+			dec_zone_page_state(page, NR_ZONE_WRITE_PENDING);
 			dec_wb_stat(wb, WB_RECLAIMABLE);
 			ret = 1;
 		}
 		unlocked_inode_to_wb_end(inode, &cookie);
-		mem_cgroup_end_page_stat(memcg);
 		return ret;
 	}
 	return TestClearPageDirty(page);
@@ -2752,10 +2737,12 @@ int test_clear_page_writeback(struct page *page)
 {
 	struct address_space *mapping = page_mapping(page);
 	struct mem_cgroup *memcg;
+	struct lruvec *lruvec;
 	int ret;
 
-	memcg = mem_cgroup_begin_page_stat(page);
-	if (mapping) {
+	memcg = lock_page_memcg(page);
+	lruvec = mem_cgroup_page_lruvec(page, page_pgdat(page));
+	if (mapping && mapping_use_writeback_tags(mapping)) {
 		struct inode *inode = mapping->host;
 		struct backing_dev_info *bdi = inode_to_bdi(inode);
 		unsigned long flags;
@@ -2769,31 +2756,41 @@ int test_clear_page_writeback(struct page *page)
 			if (bdi_cap_account_writeback(bdi)) {
 				struct bdi_writeback *wb = inode_to_wb(inode);
 
-				__dec_wb_stat(wb, WB_WRITEBACK);
+				dec_wb_stat(wb, WB_WRITEBACK);
 				__wb_writeout_inc(wb);
 			}
 		}
+
+		if (mapping->host && !mapping_tagged(mapping,
+						     PAGECACHE_TAG_WRITEBACK))
+			sb_clear_inode_writeback(mapping->host);
+
 		spin_unlock_irqrestore(&mapping->tree_lock, flags);
 	} else {
 		ret = TestClearPageWriteback(page);
 	}
+	/*
+	 * NOTE: Page might be free now! Writeback doesn't hold a page
+	 * reference on its own, it relies on truncation to wait for
+	 * the clearing of PG_writeback. The below can only access
+	 * page state that is static across allocation cycles.
+	 */
 	if (ret) {
-		mem_cgroup_dec_page_stat(memcg, MEM_CGROUP_STAT_WRITEBACK);
-		dec_zone_page_state(page, NR_WRITEBACK);
-		inc_zone_page_state(page, NR_WRITTEN);
+		dec_lruvec_state(lruvec, NR_WRITEBACK);
+		dec_zone_page_state(page, NR_ZONE_WRITE_PENDING);
+		inc_node_page_state(page, NR_WRITTEN);
 	}
-	mem_cgroup_end_page_stat(memcg);
+	__unlock_page_memcg(memcg);
 	return ret;
 }
 
 int __test_set_page_writeback(struct page *page, bool keep_write)
 {
 	struct address_space *mapping = page_mapping(page);
-	struct mem_cgroup *memcg;
 	int ret;
 
-	memcg = mem_cgroup_begin_page_stat(page);
-	if (mapping) {
+	lock_page_memcg(page);
+	if (mapping && mapping_use_writeback_tags(mapping)) {
 		struct inode *inode = mapping->host;
 		struct backing_dev_info *bdi = inode_to_bdi(inode);
 		unsigned long flags;
@@ -2801,11 +2798,24 @@ int __test_set_page_writeback(struct page *page, bool keep_write)
 		spin_lock_irqsave(&mapping->tree_lock, flags);
 		ret = TestSetPageWriteback(page);
 		if (!ret) {
+			bool on_wblist;
+
+			on_wblist = mapping_tagged(mapping,
+						   PAGECACHE_TAG_WRITEBACK);
+
 			radix_tree_tag_set(&mapping->page_tree,
 						page_index(page),
 						PAGECACHE_TAG_WRITEBACK);
 			if (bdi_cap_account_writeback(bdi))
-				__inc_wb_stat(inode_to_wb(inode), WB_WRITEBACK);
+				inc_wb_stat(inode_to_wb(inode), WB_WRITEBACK);
+
+			/*
+			 * We can come through here when swapping anonymous
+			 * pages, so we don't necessarily have an inode to track
+			 * for sync.
+			 */
+			if (mapping->host && !on_wblist)
+				sb_mark_inode_writeback(mapping->host);
 		}
 		if (!PageDirty(page))
 			radix_tree_tag_clear(&mapping->page_tree,
@@ -2820,10 +2830,10 @@ int __test_set_page_writeback(struct page *page, bool keep_write)
 		ret = TestSetPageWriteback(page);
 	}
 	if (!ret) {
-		mem_cgroup_inc_page_stat(memcg, MEM_CGROUP_STAT_WRITEBACK);
-		inc_zone_page_state(page, NR_WRITEBACK);
+		inc_lruvec_page_state(page, NR_WRITEBACK);
+		inc_zone_page_state(page, NR_ZONE_WRITE_PENDING);
 	}
-	mem_cgroup_end_page_stat(memcg);
+	unlock_page_memcg(page);
 	return ret;
 
 }

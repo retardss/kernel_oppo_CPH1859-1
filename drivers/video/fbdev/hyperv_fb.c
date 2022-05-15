@@ -712,7 +712,12 @@ static int hvfb_getmem(struct hv_device *hdev, struct fb_info *info)
 		goto err1;
 	}
 
-	fb_virt = ioremap(par->mem->start, screen_fb_size);
+	/*
+	 * Map the VRAM cacheable for performance. This is also required for
+	 * VM Connect to display properly for ARM64 Linux VM, as the host also
+	 * maps the VRAM cacheable.
+	 */
+	fb_virt = ioremap_cache(par->mem->start, screen_fb_size);
 	if (!fb_virt)
 		goto err2;
 
@@ -743,7 +748,7 @@ static int hvfb_getmem(struct hv_device *hdev, struct fb_info *info)
 err3:
 	iounmap(fb_virt);
 err2:
-	release_mem_region(par->mem->start, screen_fb_size);
+	vmbus_free_mmio(par->mem->start, screen_fb_size);
 	par->mem = NULL;
 err1:
 	if (!gen2vm)
@@ -758,7 +763,7 @@ static void hvfb_putmem(struct fb_info *info)
 	struct hvfb_par *par = info->par;
 
 	iounmap(info->screen_base);
-	release_mem_region(par->mem->start, screen_fb_size);
+	vmbus_free_mmio(par->mem->start, screen_fb_size);
 	par->mem = NULL;
 }
 

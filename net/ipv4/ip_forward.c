@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * INET		An implementation of the TCP/IP protocol suite for the LINUX
  *		operating system.  INET is implemented using the  BSD Socket
@@ -54,13 +55,7 @@ static bool ip_exceeds_mtu(const struct sk_buff *skb, unsigned int mtu)
 	if (skb->ignore_df)
 		return false;
 
-	if (skb_is_gso(skb) && skb_gso_network_seglen(skb) <= mtu) {
-		/* gro on: clatd checksum fail patch */
-		if (skb_shinfo(skb)->gso_size == 1) {
-			int network_header = (skb_gso_network_seglen(skb) - skb_shinfo(skb)->gso_size);
-
-			skb_shinfo(skb)->gso_size = mtu - network_header;
-		}
+	if (skb_is_gso(skb) && skb_gso_validate_mtu(skb, mtu))
 		return false;
 	}
 
@@ -72,13 +67,12 @@ static int ip_forward_finish(struct net *net, struct sock *sk, struct sk_buff *s
 {
 	struct ip_options *opt	= &(IPCB(skb)->opt);
 
-	IP_INC_STATS_BH(net, IPSTATS_MIB_OUTFORWDATAGRAMS);
-	IP_ADD_STATS_BH(net, IPSTATS_MIB_OUTOCTETS, skb->len);
+	__IP_INC_STATS(net, IPSTATS_MIB_OUTFORWDATAGRAMS);
+	__IP_ADD_STATS(net, IPSTATS_MIB_OUTOCTETS, skb->len);
 
 	if (unlikely(opt->optlen))
 		ip_forward_options(skb);
 
-	skb_sender_cpu_clear(skb);
 	return dst_output(net, sk, skb);
 }
 
@@ -165,7 +159,7 @@ sr_failed:
 
 too_many_hops:
 	/* Tell the sender its packet died... */
-	IP_INC_STATS_BH(net, IPSTATS_MIB_INHDRERRORS);
+	__IP_INC_STATS(net, IPSTATS_MIB_INHDRERRORS);
 	icmp_send(skb, ICMP_TIME_EXCEEDED, ICMP_EXC_TTL, 0);
 drop:
 	kfree_skb(skb);

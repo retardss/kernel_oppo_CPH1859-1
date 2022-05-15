@@ -312,6 +312,9 @@ static int set_sample_rate_v1(struct snd_usb_audio *chip, int iface,
 	 * support reading */
 	if (snd_usb_get_sample_rate_quirk(chip))
 		return 0;
+	/* the firmware is likely buggy, don't repeat to fail too many times */
+	if (chip->sample_rate_read_error > 2)
+		return 0;
 
 	if ((err = snd_usb_ctl_msg(dev, usb_rcvctrlpipe(dev, 0), UAC_GET_CUR,
 				   USB_TYPE_CLASS | USB_RECIP_ENDPOINT | USB_DIR_IN,
@@ -319,10 +322,17 @@ static int set_sample_rate_v1(struct snd_usb_audio *chip, int iface,
 				   data, sizeof(data))) < 0) {
 		dev_err(&dev->dev, "%d:%d: cannot get freq at ep %#x\n",
 			iface, fmt->altsetting, ep);
+		chip->sample_rate_read_error++;
 		return 0; /* some devices don't support reading */
 	}
 
 	crate = data[0] | (data[1] << 8) | (data[2] << 16);
+	if (!crate) {
+		dev_info(&dev->dev, "failed to read current rate; disabling the check\n");
+		chip->sample_rate_read_error = 3; /* three strikes, see above */
+		return 0;
+	}
+
 	if (crate != rate) {
 		dev_warn(&dev->dev, "current rate %d is different from the runtime rate %d\n", crate, rate);
 		// runtime->rate = crate;
@@ -427,6 +437,10 @@ int snd_usb_init_sample_rate(struct snd_usb_audio *chip, int iface,
 
 	case UAC_VERSION_2:
 		return set_sample_rate_v2(chip, iface, alts, fmt, rate);
+
+	/* Clock rate is fixed at 48 kHz for BADD devices */
+	case UAC_VERSION_3:
+		return 0;
 	}
 }
 

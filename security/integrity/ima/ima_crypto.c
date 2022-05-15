@@ -24,7 +24,7 @@
 #include <linux/err.h>
 #include <linux/slab.h>
 #include <crypto/hash.h>
-#include <crypto/hash_info.h>
+
 #include "ima.h"
 
 struct ahash_completion {
@@ -232,7 +232,7 @@ static int ima_calc_file_hash_atfm(struct file *file,
 {
 	loff_t i_size, offset;
 	char *rbuf[2] = { NULL, };
-	int rc, read = 0, rbuf_len, active = 0, ahash_rc = 0;
+	int rc, rbuf_len, active = 0, ahash_rc = 0;
 	struct ahash_request *req;
 	struct scatterlist sg[1];
 	struct ahash_completion res;
@@ -279,11 +279,6 @@ static int ima_calc_file_hash_atfm(struct file *file,
 					  &rbuf_size[1], 0);
 	}
 
-	if (!(file->f_mode & FMODE_READ)) {
-		file->f_mode |= FMODE_READ;
-		read = 1;
-	}
-
 	for (offset = 0; offset < i_size; offset += rbuf_len) {
 		if (!rbuf[1] && offset) {
 			/* Not using two buffers, and it is not the first
@@ -298,8 +293,11 @@ static int ima_calc_file_hash_atfm(struct file *file,
 		rbuf_len = min_t(loff_t, i_size - offset, rbuf_size[active]);
 		rc = integrity_kernel_read(file, offset, rbuf[active],
 					   rbuf_len);
-		if (rc != rbuf_len)
+		if (rc != rbuf_len) {
+			if (rc >= 0)
+				rc = -EINVAL;
 			goto out3;
+		}
 
 		if (rbuf[1] && offset) {
 			/* Using two buffers, and it is not the first
@@ -322,8 +320,6 @@ static int ima_calc_file_hash_atfm(struct file *file,
 	/* wait for the last update request to complete */
 	rc = ahash_wait(ahash_rc, &res);
 out3:
-	if (read)
-		file->f_mode &= ~FMODE_READ;
 	ima_free_pages(rbuf[0], rbuf_size[0]);
 	ima_free_pages(rbuf[1], rbuf_size[1]);
 out2:
@@ -358,7 +354,7 @@ static int ima_calc_file_hash_tfm(struct file *file,
 {
 	loff_t i_size, offset = 0;
 	char *rbuf;
-	int rc, read = 0;
+	int rc;
 	SHASH_DESC_ON_STACK(shash, tfm);
 
 	shash->tfm = tfm;
@@ -379,11 +375,6 @@ static int ima_calc_file_hash_tfm(struct file *file,
 	if (!rbuf)
 		return -ENOMEM;
 
-	if (!(file->f_mode & FMODE_READ)) {
-		file->f_mode |= FMODE_READ;
-		read = 1;
-	}
-
 	while (offset < i_size) {
 		int rbuf_len;
 
@@ -400,8 +391,6 @@ static int ima_calc_file_hash_tfm(struct file *file,
 		if (rc)
 			break;
 	}
-	if (read)
-		file->f_mode &= ~FMODE_READ;
 	kfree(rbuf);
 out:
 	if (!rc)
@@ -442,16 +431,44 @@ int ima_calc_file_hash(struct file *file, struct ima_digest_data *hash)
 {
 	loff_t i_size;
 	int rc;
+	struct file *f = file;
+	bool new_file_instance = false;
 
-	i_size = i_size_read(file_inode(file));
-
-	if (ima_ahash_minsize && i_size >= ima_ahash_minsize) {
-		rc = ima_calc_file_ahash(file, hash);
-		if (!rc)
-			return 0;
+	/*
+	 * For consistency, fail file's opened with the O_DIRECT flag on
+	 * filesystems mounted with/without DAX option.
+	 */
+	if (file->f_flags & O_DIRECT) {
+		hash->length = hash_digest_size[ima_hash_algo];
+		hash->algo = ima_hash_algo;
+		return -EINVAL;
 	}
 
-	return ima_calc_file_shash(file, hash);
+	/* Open a new file instance in O_RDONLY if we cannot read */
+	if (!(file->f_mode & FMODE_READ)) {
+		int flags = file->f_flags & ~(O_WRONLY | O_APPEND |
+				O_TRUNC | O_CREAT | O_NOCTTY | O_EXCL);
+		flags |= O_RDONLY;
+		f = dentry_open(&file->f_path, flags, file->f_cred);
+		if (IS_ERR(f))
+			return PTR_ERR(f);
+
+		new_file_instance = true;
+	}
+
+	i_size = i_size_read(file_inode(f));
+
+	if (ima_ahash_minsize && i_size >= ima_ahash_minsize) {
+		rc = ima_calc_file_ahash(f, hash);
+		if (!rc)
+			goto out;
+	}
+
+	rc = ima_calc_file_shash(f, hash);
+out:
+	if (new_file_instance)
+		fput(f);
+	return rc;
 }
 
 /*
@@ -479,11 +496,13 @@ static int ima_calc_field_array_hash_tfm(struct ima_field_data *field_data,
 		u8 buffer[IMA_EVENT_NAME_LEN_MAX + 1] = { 0 };
 		u8 *data_to_hash = field_data[i].data;
 		u32 datalen = field_data[i].len;
+		u32 datalen_to_hash =
+		    !ima_canonical_fmt ? datalen : cpu_to_le32(datalen);
 
 		if (strcmp(td->name, IMA_TEMPLATE_IMA_NAME) != 0) {
 			rc = crypto_shash_update(shash,
-						(const u8 *) &field_data[i].len,
-						sizeof(field_data[i].len));
+						(const u8 *) &datalen_to_hash,
+						sizeof(datalen_to_hash));
 			if (rc)
 				break;
 		} else if (strcmp(td->fields[i]->field_id, "n") == 0) {
@@ -521,6 +540,124 @@ int ima_calc_field_array_hash(struct ima_field_data *field_data,
 	return rc;
 }
 
+static int calc_buffer_ahash_atfm(const void *buf, loff_t len,
+				  struct ima_digest_data *hash,
+				  struct crypto_ahash *tfm)
+{
+	struct ahash_request *req;
+	struct scatterlist sg;
+	struct ahash_completion res;
+	int rc, ahash_rc = 0;
+
+	hash->length = crypto_ahash_digestsize(tfm);
+
+	req = ahash_request_alloc(tfm, GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+
+	init_completion(&res.completion);
+	ahash_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG |
+				   CRYPTO_TFM_REQ_MAY_SLEEP,
+				   ahash_complete, &res);
+
+	rc = ahash_wait(crypto_ahash_init(req), &res);
+	if (rc)
+		goto out;
+
+	sg_init_one(&sg, buf, len);
+	ahash_request_set_crypt(req, &sg, NULL, len);
+
+	ahash_rc = crypto_ahash_update(req);
+
+	/* wait for the update request to complete */
+	rc = ahash_wait(ahash_rc, &res);
+	if (!rc) {
+		ahash_request_set_crypt(req, NULL, hash->digest, 0);
+		rc = ahash_wait(crypto_ahash_final(req), &res);
+	}
+out:
+	ahash_request_free(req);
+	return rc;
+}
+
+static int calc_buffer_ahash(const void *buf, loff_t len,
+			     struct ima_digest_data *hash)
+{
+	struct crypto_ahash *tfm;
+	int rc;
+
+	tfm = ima_alloc_atfm(hash->algo);
+	if (IS_ERR(tfm))
+		return PTR_ERR(tfm);
+
+	rc = calc_buffer_ahash_atfm(buf, len, hash, tfm);
+
+	ima_free_atfm(tfm);
+
+	return rc;
+}
+
+static int calc_buffer_shash_tfm(const void *buf, loff_t size,
+				struct ima_digest_data *hash,
+				struct crypto_shash *tfm)
+{
+	SHASH_DESC_ON_STACK(shash, tfm);
+	unsigned int len;
+	int rc;
+
+	shash->tfm = tfm;
+	shash->flags = 0;
+
+	hash->length = crypto_shash_digestsize(tfm);
+
+	rc = crypto_shash_init(shash);
+	if (rc != 0)
+		return rc;
+
+	while (size) {
+		len = size < PAGE_SIZE ? size : PAGE_SIZE;
+		rc = crypto_shash_update(shash, buf, len);
+		if (rc)
+			break;
+		buf += len;
+		size -= len;
+	}
+
+	if (!rc)
+		rc = crypto_shash_final(shash, hash->digest);
+	return rc;
+}
+
+static int calc_buffer_shash(const void *buf, loff_t len,
+			     struct ima_digest_data *hash)
+{
+	struct crypto_shash *tfm;
+	int rc;
+
+	tfm = ima_alloc_tfm(hash->algo);
+	if (IS_ERR(tfm))
+		return PTR_ERR(tfm);
+
+	rc = calc_buffer_shash_tfm(buf, len, hash, tfm);
+
+	ima_free_tfm(tfm);
+	return rc;
+}
+
+int ima_calc_buffer_hash(const void *buf, loff_t len,
+			 struct ima_digest_data *hash)
+{
+	int rc;
+
+	if (ima_ahash_minsize && len >= ima_ahash_minsize) {
+		rc = calc_buffer_ahash(buf, len, hash);
+		if (!rc)
+			return 0;
+	}
+
+	return calc_buffer_shash(buf, len, hash);
+}
+
 static void __init ima_pcrread(int idx, u8 *pcr)
 {
 	if (!ima_used_chip)
@@ -552,6 +689,8 @@ static int __init ima_calc_boot_aggregate_tfm(char *digest,
 		ima_pcrread(i, pcr_i);
 		/* now accumulate with current aggregate */
 		rc = crypto_shash_update(shash, pcr_i, TPM_DIGEST_SIZE);
+		if (rc != 0)
+			return rc;
 	}
 	if (!rc)
 		crypto_shash_final(shash, digest);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * The USB Monitor, inspired by Dave Harding's USBMon.
  *
@@ -8,12 +9,14 @@
 #include <linux/list.h>
 #include <linux/usb.h>
 #include <linux/slab.h>
+#include <linux/sched/signal.h>
 #include <linux/time.h>
+#include <linux/ktime.h>
 #include <linux/export.h>
 #include <linux/mutex.h>
 #include <linux/debugfs.h>
 #include <linux/scatterlist.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "usb_mon.h"
 
@@ -178,12 +181,12 @@ static inline char mon_text_get_data(struct mon_event_text *ep, struct urb *urb,
 
 static inline unsigned int mon_get_timestamp(void)
 {
-	struct timeval tval;
+	struct timespec64 now;
 	unsigned int stamp;
 
-	do_gettimeofday(&tval);
-	stamp = tval.tv_sec & 0xFFF;	/* 2^32 = 4294967296. Limit to 4096s. */
-	stamp = stamp * 1000000 + tval.tv_usec;
+	ktime_get_ts64(&now);
+	stamp = now.tv_sec & 0xFFF;  /* 2^32 = 4294967296. Limit to 4096s. */
+	stamp = stamp * USEC_PER_SEC + now.tv_nsec / NSEC_PER_USEC;
 	return stamp;
 }
 
@@ -349,7 +352,7 @@ static int mon_text_open(struct inode *inode, struct file *file)
 	rp->r.rnf_error = mon_text_error;
 	rp->r.rnf_complete = mon_text_complete;
 
-	snprintf(rp->slab_name, SLAB_NAME_SZ, "mon_text_%p", rp);
+	snprintf(rp->slab_name, SLAB_NAME_SZ, "mon_text_%pK", rp);
 	rp->e_slab = kmem_cache_create(rp->slab_name,
 	    sizeof(struct mon_event_text), sizeof(long), 0,
 	    mon_text_ctor);

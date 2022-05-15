@@ -254,7 +254,6 @@ static struct dm_block_validator sb_validator = {
  * Low level metadata handling
  *--------------------------------------------------------------*/
 #define DM_ERA_METADATA_BLOCK_SIZE 4096
-#define DM_ERA_METADATA_CACHE_SIZE 64
 #define ERA_MAX_CONCURRENT_LOCKS 5
 
 struct era_metadata {
@@ -615,7 +614,6 @@ static int create_persistent_data_objects(struct era_metadata *md,
 	int r;
 
 	md->bm = dm_block_manager_create(md->bdev, DM_ERA_METADATA_BLOCK_SIZE,
-					 DM_ERA_METADATA_CACHE_SIZE,
 					 ERA_MAX_CONCURRENT_LOCKS);
 	if (IS_ERR(md->bm)) {
 		DMERR("could not create block manager");
@@ -1194,7 +1192,7 @@ static dm_block_t get_block(struct era *era, struct bio *bio)
 
 static void remap_to_origin(struct era *era, struct bio *bio)
 {
-	bio->bi_bdev = era->origin_dev->bdev;
+	bio_set_dev(bio, era->origin_dev->bdev);
 }
 
 /*----------------------------------------------------------------
@@ -1540,9 +1538,9 @@ static int era_map(struct dm_target *ti, struct bio *bio)
 	remap_to_origin(era, bio);
 
 	/*
-	 * REQ_FLUSH bios carry no data, so we're not interested in them.
+	 * REQ_PREFLUSH bios carry no data, so we're not interested in them.
 	 */
-	if (!(bio->bi_rw & REQ_FLUSH) &&
+	if (!(bio->bi_opf & REQ_PREFLUSH) &&
 	    (bio_data_dir(bio) == WRITE) &&
 	    !metadata_current_marked(era->md, block)) {
 		defer_bio(era, bio);

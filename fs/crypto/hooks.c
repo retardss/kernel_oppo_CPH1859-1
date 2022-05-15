@@ -57,7 +57,7 @@ int __fscrypt_prepare_link(struct inode *inode, struct inode *dir)
 		return err;
 
 	if (!fscrypt_has_permitted_context(dir, inode))
-		return -EPERM;
+		return -EXDEV;
 
 	return 0;
 }
@@ -81,13 +81,13 @@ int __fscrypt_prepare_rename(struct inode *old_dir, struct dentry *old_dentry,
 		if (IS_ENCRYPTED(new_dir) &&
 		    !fscrypt_has_permitted_context(new_dir,
 						   d_inode(old_dentry)))
-			return -EPERM;
+			return -EXDEV;
 
 		if ((flags & RENAME_EXCHANGE) &&
 		    IS_ENCRYPTED(old_dir) &&
 		    !fscrypt_has_permitted_context(old_dir,
 						   d_inode(new_dentry)))
-			return -EPERM;
+			return -EXDEV;
 	}
 	return 0;
 }
@@ -210,8 +210,9 @@ EXPORT_SYMBOL_GPL(__fscrypt_encrypt_symlink);
  *
  * Return: the presentable symlink target or an ERR_PTR()
  */
-void *fscrypt_get_symlink(struct inode *inode, const void *caddr,
-				unsigned int max_size)
+const char *fscrypt_get_symlink(struct inode *inode, const void *caddr,
+				unsigned int max_size,
+				struct delayed_call *done)
 {
 	const struct fscrypt_symlink_data *sd;
 	struct fscrypt_str cstr, pstr;
@@ -259,6 +260,7 @@ void *fscrypt_get_symlink(struct inode *inode, const void *caddr,
 		goto err_kfree;
 
 	pstr.name[pstr.len] = '\0';
+	set_delayed_call(done, kfree_link, pstr.name);
 	return pstr.name;
 
 err_kfree:

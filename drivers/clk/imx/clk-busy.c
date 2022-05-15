@@ -38,7 +38,7 @@ struct clk_busy_divider {
 
 static inline struct clk_busy_divider *to_clk_busy_divider(struct clk_hw *hw)
 {
-	struct clk_divider *div = container_of(hw, struct clk_divider, hw);
+	struct clk_divider *div = to_clk_divider(hw);
 
 	return container_of(div, struct clk_busy_divider, div);
 }
@@ -123,7 +123,7 @@ struct clk_busy_mux {
 
 static inline struct clk_busy_mux *to_clk_busy_mux(struct clk_hw *hw)
 {
-	struct clk_mux *mux = container_of(hw, struct clk_mux, hw);
+	struct clk_mux *mux = to_clk_mux(hw);
 
 	return container_of(mux, struct clk_busy_mux, mux);
 }
@@ -154,7 +154,7 @@ static struct clk_ops clk_busy_mux_ops = {
 
 struct clk *imx_clk_busy_mux(const char *name, void __iomem *reg, u8 shift,
 			     u8 width, void __iomem *busy_reg, u8 busy_shift,
-			     const char **parent_names, int num_parents)
+			     const char * const *parent_names, int num_parents)
 {
 	struct clk_busy_mux *busy;
 	struct clk *clk;

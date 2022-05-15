@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef DW_SPI_HEADER_H
 #define DW_SPI_HEADER_H
 
@@ -101,7 +102,6 @@ struct dw_spi_dma_ops {
 struct dw_spi {
 	struct spi_master	*master;
 	enum dw_ssi_type	type;
-	char			name[16];
 
 	void __iomem		*regs;
 	unsigned long		paddr;
@@ -117,12 +117,14 @@ struct dw_spi {
 	size_t			len;
 	void			*tx;
 	void			*tx_end;
+	spinlock_t		buf_lock;
 	void			*rx;
 	void			*rx_end;
 	int			dma_mapped;
 	u8			n_bytes;	/* current is a 1/2 bytes op */
 	u32			dma_width;
 	irqreturn_t		(*transfer_handler)(struct dw_spi *dws);
+	u32			current_freq;	/* frequency in hz */
 
 	/* DMA info */
 	int			dma_inited;
@@ -130,7 +132,7 @@ struct dw_spi {
 	struct dma_chan		*rxchan;
 	unsigned long		dma_chan_busy;
 	dma_addr_t		dma_addr; /* phy address of the Data register */
-	struct dw_spi_dma_ops	*dma_ops;
+	const struct dw_spi_dma_ops *dma_ops;
 	void			*dma_tx;
 	void			*dma_rx;
 

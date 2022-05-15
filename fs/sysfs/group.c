@@ -110,7 +110,8 @@ static int internal_create_group(struct kobject *kobj, int update,
 	struct kernfs_node *kn;
 	int error;
 
-	BUG_ON(!kobj || (!update && !kobj->sd));
+	if (WARN_ON(!kobj || (!update && !kobj->sd)))
+		return -EINVAL;
 
 	/* Updates may happen before the object has been instantiated */
 	if (unlikely(update && !kobj->sd))
@@ -233,8 +234,8 @@ void sysfs_remove_group(struct kobject *kobj,
 		kn = kernfs_find_and_get(parent, grp->name);
 		if (!kn) {
 			WARN(!kn, KERN_WARNING
-			     "sysfs group %p not found for kobject '%s'\n",
-			     grp, kobject_name(kobj));
+			     "sysfs group '%s' not found for kobject '%s'\n",
+			     grp->name, kobject_name(kobj));
 			return;
 		}
 	} else {

@@ -23,7 +23,7 @@
 #include <linux/spinlock.h>
 
 struct mtk_sysirq_chip_data {
-	spinlock_t lock;
+	raw_spinlock_t lock;
 	u32 nr_intpol_bases;
 	void __iomem **intpol_bases;
 	u32 *intpol_words;
@@ -45,7 +45,7 @@ static int mtk_sysirq_set_type(struct irq_data *data, unsigned int type)
 	reg_index = chip_data->which_word[hwirq];
 	offset = hwirq & 0x1f;
 
-	spin_lock_irqsave(&chip_data->lock, flags);
+	raw_spin_lock_irqsave(&chip_data->lock, flags);
 	value = readl_relaxed(base + reg_index * 4);
 	if (type == IRQ_TYPE_LEVEL_LOW || type == IRQ_TYPE_EDGE_FALLING) {
 		if (type == IRQ_TYPE_LEVEL_LOW)
@@ -57,11 +57,11 @@ static int mtk_sysirq_set_type(struct irq_data *data, unsigned int type)
 		value &= ~(1 << offset);
 	}
 
-	writel(value, base + reg_index * 4);
+	writel_relaxed(value, base + reg_index * 4);
 
 	data = data->parent_data;
 	ret = data->chip->irq_set_type(data, type);
-	spin_unlock_irqrestore(&chip_data->lock, flags);
+	raw_spin_unlock_irqrestore(&chip_data->lock, flags);
 	return ret;
 }
 
@@ -134,7 +134,6 @@ static int __init mtk_sysirq_of_init(struct device_node *node,
 	struct mtk_sysirq_chip_data *chip_data;
 	int ret, size, intpol_num = 0, nr_intpol_bases = 0, i = 0;
 
-
 	domain_parent = irq_find_host(parent);
 	if (!domain_parent) {
 		pr_err("mtk_sysirq: interrupt-parent not found\n");
@@ -149,7 +148,7 @@ static int __init mtk_sysirq_of_init(struct device_node *node,
 		nr_intpol_bases++;
 
 	if (nr_intpol_bases == 0) {
-		pr_info("mtk_sysirq: base address not specified\n");
+		pr_err("mtk_sysirq: base address not specified\n");
 		ret = -EINVAL;
 		goto out_free_chip;
 	}
@@ -179,8 +178,7 @@ static int __init mtk_sysirq_of_init(struct device_node *node,
 		chip_data->intpol_words[i] = size / 4;
 		chip_data->intpol_bases[i] = of_iomap(node, i);
 		if (ret || !chip_data->intpol_bases[i]) {
-			pr_info("%s: couldn't map region %d\n",
-			       node->full_name, i);
+			pr_err("%pOF: couldn't map region %d\n", node, i);
 			ret = -ENODEV;
 			goto out_free_intpol;
 		}
@@ -222,7 +220,7 @@ static int __init mtk_sysirq_of_init(struct device_node *node,
 		ret = -ENOMEM;
 		goto out_free_which_word;
 	}
-	spin_lock_init(&chip_data->lock);
+	raw_spin_lock_init(&chip_data->lock);
 
 	return 0;
 

@@ -23,9 +23,9 @@
 #include <linux/usb.h>
 #include <linux/i2c.h>
 #include <asm/byteorder.h>
-#include <media/saa7115.h>
+#include <media/i2c/saa7115.h>
 #include <media/tuner.h>
-#include <media/uda1342.h>
+#include <media/i2c/uda1342.h>
 
 #include "go7007-priv.h"
 
@@ -932,7 +932,7 @@ static void go7007_usb_release(struct go7007 *go)
 	kfree(go->hpi_context);
 }
 
-static struct go7007_hpi_ops go7007_usb_ezusb_hpi_ops = {
+static const struct go7007_hpi_ops go7007_usb_ezusb_hpi_ops = {
 	.interface_reset	= go7007_usb_interface_reset,
 	.write_interrupt	= go7007_usb_ezusb_write_interrupt,
 	.read_interrupt		= go7007_usb_read_interrupt,
@@ -942,7 +942,7 @@ static struct go7007_hpi_ops go7007_usb_ezusb_hpi_ops = {
 	.release		= go7007_usb_release,
 };
 
-static struct go7007_hpi_ops go7007_usb_onboard_hpi_ops = {
+static const struct go7007_hpi_ops go7007_usb_onboard_hpi_ops = {
 	.interface_reset	= go7007_usb_interface_reset,
 	.write_interrupt	= go7007_usb_onboard_write_interrupt,
 	.read_interrupt		= go7007_usb_read_interrupt,
@@ -1032,7 +1032,7 @@ static u32 go7007_usb_functionality(struct i2c_adapter *adapter)
 	return (I2C_FUNC_SMBUS_EMUL) & ~I2C_FUNC_SMBUS_QUICK;
 }
 
-static struct i2c_algorithm go7007_usb_algo = {
+static const struct i2c_algorithm go7007_usb_algo = {
 	.master_xfer	= go7007_usb_i2c_master_xfer,
 	.functionality	= go7007_usb_functionality,
 };
@@ -1052,6 +1052,7 @@ static int go7007_usb_probe(struct usb_interface *intf,
 	struct go7007_usb *usb;
 	const struct go7007_usb_board *board;
 	struct usb_device *usbdev = interface_to_usbdev(intf);
+	struct usb_host_endpoint *ep;
 	unsigned num_i2c_devs;
 	char *name;
 	int video_pipe, i, v_urb_len;
@@ -1147,7 +1148,8 @@ static int go7007_usb_probe(struct usb_interface *intf,
 	if (usb->intr_urb->transfer_buffer == NULL)
 		goto allocfail;
 
-	if (go->board_id == GO7007_BOARDID_SENSORAY_2250)
+	ep = usb->usbdev->ep_in[4];
+	if (usb_endpoint_type(&ep->desc) == USB_ENDPOINT_XFER_BULK)
 		usb_fill_bulk_urb(usb->intr_urb, usb->usbdev,
 			usb_rcvbulkpipe(usb->usbdev, 4),
 			usb->intr_urb->transfer_buffer, 2*sizeof(u16),
@@ -1289,7 +1291,7 @@ static int go7007_usb_probe(struct usb_interface *intf,
 
 	/* Allocate the URBs and buffers for receiving the audio stream */
 	if ((board->flags & GO7007_USB_EZUSB) &&
-	    (board->flags & GO7007_BOARD_HAS_AUDIO)) {
+	    (board->main_info.flags & GO7007_BOARD_HAS_AUDIO)) {
 		for (i = 0; i < 8; ++i) {
 			usb->audio_urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
 			if (usb->audio_urbs[i] == NULL)

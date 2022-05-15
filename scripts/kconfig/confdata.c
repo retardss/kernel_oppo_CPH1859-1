@@ -375,7 +375,9 @@ load:
 				continue;
 		} else {
 			if (line[0] != '\r' && line[0] != '\n')
-				conf_warning("unexpected data");
+				conf_warning("unexpected data: %.*s",
+					     (int)strcspn(line, "\r\n"), line);
+
 			continue;
 		}
 setsym:
@@ -1236,7 +1238,7 @@ bool conf_set_all_new_symbols(enum conf_def_mode mode)
 
 		sym_calc_value(csym);
 		if (mode == def_random)
-			has_changed = randomize_choice_values(csym);
+			has_changed |= randomize_choice_values(csym);
 		else {
 			set_all_choice_values(csym);
 			has_changed = true;

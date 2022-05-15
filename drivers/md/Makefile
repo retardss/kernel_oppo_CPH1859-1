@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for the kernel software RAID and LVM drivers.
 #
@@ -7,22 +8,24 @@ ccflags-y += -I$(srctree)/drivers/misc/mediatek/fde_aes/$(MTK_PLATFORM)
 endif
 
 dm-mod-y	+= dm.o dm-table.o dm-target.o dm-linear.o dm-stripe.o \
-		   dm-ioctl.o dm-io.o dm-kcopyd.o dm-sysfs.o dm-stats.o
+		   dm-ioctl.o dm-io.o dm-kcopyd.o dm-sysfs.o dm-stats.o \
+		   dm-rq.o
 dm-multipath-y	+= dm-path-selector.o dm-mpath.o
 dm-snapshot-y	+= dm-snap.o dm-exception-store.o dm-snap-transient.o \
 		    dm-snap-persistent.o
 dm-mirror-y	+= dm-raid1.o
 dm-log-userspace-y \
 		+= dm-log-userspace-base.o dm-log-userspace-transfer.o
+dm-bio-prison-y += dm-bio-prison-v1.o dm-bio-prison-v2.o
 dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
-dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o
-dm-cache-mq-y   += dm-cache-policy-mq.o
+dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o \
+		    dm-cache-background-tracker.o
 dm-cache-smq-y   += dm-cache-policy-smq.o
-dm-cache-cleaner-y += dm-cache-policy-cleaner.o
 dm-era-y	+= dm-era-target.o
 dm-verity-y	+= dm-verity-target.o
 md-mod-y	+= md.o bitmap.o
-raid456-y	+= raid5.o raid5-cache.o
+raid456-y	+= raid5.o raid5-cache.o raid5-ppl.o
+dm-zoned-y	+= dm-zoned-target.o dm-zoned-metadata.o dm-zoned-reclaim.o
 
 # Note: link order is important.  All raid personalities
 # and must come before md.o, as they each initialise
@@ -44,6 +47,7 @@ obj-$(CONFIG_BLK_DEV_DM_BUILTIN) += dm-builtin.o
 obj-$(CONFIG_DM_BUFIO)		+= dm-bufio.o
 obj-$(CONFIG_DM_BIO_PRISON)	+= dm-bio-prison.o
 obj-$(CONFIG_DM_CRYPT)		+= dm-crypt.o
+obj-$(CONFIG_DM_DEFAULT_KEY)	+= dm-default-key.o
 obj-$(CONFIG_DM_DELAY)		+= dm-delay.o
 obj-$(CONFIG_DM_FLAKEY)		+= dm-flakey.o
 obj-$(CONFIG_DM_MULTIPATH)	+= dm-multipath.o dm-round-robin.o
@@ -59,11 +63,11 @@ obj-$(CONFIG_DM_RAID)	+= dm-raid.o
 obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thin-pool.o
 obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
-obj-$(CONFIG_DM_CACHE_MQ)	+= dm-cache-mq.o
 obj-$(CONFIG_DM_CACHE_SMQ)	+= dm-cache-smq.o
-obj-$(CONFIG_DM_CACHE_CLEANER)	+= dm-cache-cleaner.o
 obj-$(CONFIG_DM_ERA)		+= dm-era.o
 obj-$(CONFIG_DM_LOG_WRITES)	+= dm-log-writes.o
+obj-$(CONFIG_DM_INTEGRITY)	+= dm-integrity.o
+obj-$(CONFIG_DM_ZONED)		+= dm-zoned.o
 obj-$(CONFIG_DM_ANDROID_VERITY) += dm-android-verity.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
@@ -76,4 +80,8 @@ endif
 
 ifeq ($(CONFIG_DM_VERITY_AVB),y)
 dm-verity-objs			+= dm-verity-avb.o
+endif
+
+ifeq ($(CONFIG_DM_ANDROID_VERITY),y)
+dm-verity-objs			+= dm-android-verity.o
 endif

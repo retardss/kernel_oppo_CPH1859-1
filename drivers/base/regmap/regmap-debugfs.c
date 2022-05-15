@@ -77,6 +77,17 @@ static void regmap_debugfs_free_dump_cache(struct regmap *map)
 	}
 }
 
+static bool regmap_printable(struct regmap *map, unsigned int reg)
+{
+	if (regmap_precious(map, reg))
+		return false;
+
+	if (!regmap_readable(map, reg) && !regmap_cached(map, reg))
+		return false;
+
+	return true;
+}
+
 /*
  * Work out where the start offset maps into register numbers, bearing
  * in mind that we suppress hidden registers.
@@ -105,8 +116,7 @@ static unsigned int regmap_debugfs_get_dump_start(struct regmap *map,
 	if (list_empty(&map->debugfs_off_cache)) {
 		for (; i <= map->max_register; i += map->reg_stride) {
 			/* Skip unprinted registers, closing off cache entry */
-			if (!regmap_readable(map, i) ||
-			    regmap_precious(map, i)) {
+			if (!regmap_printable(map, i)) {
 				if (c) {
 					c->max = p - 1;
 					c->max_reg = i - map->reg_stride;
@@ -194,6 +204,9 @@ static ssize_t regmap_read_debugfs(struct regmap *map, unsigned int from,
 	if (*ppos < 0 || !count)
 		return -EINVAL;
 
+	if (count > (PAGE_SIZE << (MAX_ORDER - 1)))
+		count = PAGE_SIZE << (MAX_ORDER - 1);
+
 	buf = kmalloc(count, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
@@ -204,7 +217,7 @@ static ssize_t regmap_read_debugfs(struct regmap *map, unsigned int from,
 	start_reg = regmap_debugfs_get_dump_start(map, from, *ppos, &p);
 
 	for (i = start_reg; i <= to; i += map->reg_stride) {
-		if (!regmap_readable(map, i))
+		if (!regmap_readable(map, i) && !regmap_cached(map, i))
 			continue;
 
 		if (regmap_precious(map, i))
@@ -259,8 +272,7 @@ static ssize_t regmap_map_read_file(struct file *file, char __user *user_buf,
 				   count, ppos);
 }
 
-#undef REGMAP_ALLOW_WRITE_DEBUGFS
-#ifdef REGMAP_ALLOW_WRITE_DEBUGFS
+#ifdef CONFIG_REGMAP_ALLOW_WRITE_DEBUGFS
 /*
  * This can be dangerous especially when we have clients such as
  * PMICs, therefore don't provide any real compile time configuration option
@@ -310,6 +322,67 @@ static const struct file_operations regmap_map_fops = {
 	.llseek = default_llseek,
 };
 
+static ssize_t regmap_data_read_file(struct file *file, char __user *user_buf,
+				    size_t count, loff_t *ppos)
+{
+	struct regmap *map = file->private_data;
+	int new_count;
+
+	regmap_calc_tot_len(map, NULL, 0);
+	new_count = map->dump_count * map->debugfs_tot_len;
+	if (new_count > count)
+		new_count = count;
+
+	if (*ppos == 0)
+		*ppos = map->dump_address * map->debugfs_tot_len;
+	else if (*ppos >= map->dump_address * map->debugfs_tot_len
+			+ map->dump_count * map->debugfs_tot_len)
+		return 0;
+	return regmap_read_debugfs(map, 0, map->max_register, user_buf,
+			new_count, ppos);
+}
+
+#ifdef CONFIG_REGMAP_ALLOW_WRITE_DEBUGFS
+static ssize_t regmap_data_write_file(struct file *file,
+				     const char __user *user_buf,
+				     size_t count, loff_t *ppos)
+{
+	char buf[32];
+	size_t buf_size;
+	char *start = buf;
+	unsigned long value;
+	struct regmap *map = file->private_data;
+	int ret;
+
+	buf_size = min(count, (sizeof(buf)-1));
+	if (copy_from_user(buf, user_buf, buf_size))
+		return -EFAULT;
+	buf[buf_size] = 0;
+
+	while (*start == ' ')
+		start++;
+	if (kstrtoul(start, 16, &value))
+		return -EINVAL;
+
+	/* Userspace has been fiddling around behind the kernel's back */
+	add_taint(TAINT_USER, LOCKDEP_STILL_OK);
+
+	ret = regmap_write(map, map->dump_address, value);
+	if (ret < 0)
+		return ret;
+	return buf_size;
+}
+#else
+#define regmap_data_write_file NULL
+#endif
+
+static const struct file_operations regmap_data_fops = {
+	.open = simple_open,
+	.read = regmap_data_read_file,
+	.write = regmap_data_write_file,
+	.llseek = default_llseek,
+};
+
 static ssize_t regmap_range_read_file(struct file *file, char __user *user_buf,
 				      size_t count, loff_t *ppos)
 {
@@ -341,6 +414,9 @@ static ssize_t regmap_reg_ranges_read_file(struct file *file,
 
 	if (*ppos < 0 || !count)
 		return -EINVAL;
+
+	if (count > (PAGE_SIZE << (MAX_ORDER - 1)))
+		count = PAGE_SIZE << (MAX_ORDER - 1);
 
 	buf = kmalloc(count, GFP_KERNEL);
 	if (!buf)
@@ -397,72 +473,39 @@ static const struct file_operations regmap_reg_ranges_fops = {
 	.llseek = default_llseek,
 };
 
-static ssize_t regmap_access_read_file(struct file *file,
-				       char __user *user_buf, size_t count,
-				       loff_t *ppos)
+static int regmap_access_show(struct seq_file *s, void *ignored)
 {
-	int reg_len, tot_len;
-	size_t buf_pos = 0;
-	loff_t p = 0;
-	ssize_t ret;
-	int i;
-	struct regmap *map = file->private_data;
-	char *buf;
+	struct regmap *map = s->private;
+	int i, reg_len;
 
-	if (*ppos < 0 || !count)
-		return -EINVAL;
-
-	buf = kmalloc(count, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	/* Calculate the length of a fixed format  */
 	reg_len = regmap_calc_reg_len(map->max_register);
-	tot_len = reg_len + 10; /* ': R W V P\n' */
 
 	for (i = 0; i <= map->max_register; i += map->reg_stride) {
 		/* Ignore registers which are neither readable nor writable */
 		if (!regmap_readable(map, i) && !regmap_writeable(map, i))
 			continue;
 
-		/* If we're in the region the user is trying to read */
-		if (p >= *ppos) {
-			/* ...but not beyond it */
-			if (buf_pos + tot_len + 1 >= count)
-				break;
-
-			/* Format the register */
-			snprintf(buf + buf_pos, count - buf_pos,
-				 "%.*x: %c %c %c %c\n",
-				 reg_len, i,
-				 regmap_readable(map, i) ? 'y' : 'n',
-				 regmap_writeable(map, i) ? 'y' : 'n',
-				 regmap_volatile(map, i) ? 'y' : 'n',
-				 regmap_precious(map, i) ? 'y' : 'n');
-
-			buf_pos += tot_len;
-		}
-		p += tot_len;
+		/* Format the register */
+		seq_printf(s, "%.*x: %c %c %c %c\n", reg_len, i,
+			   regmap_readable(map, i) ? 'y' : 'n',
+			   regmap_writeable(map, i) ? 'y' : 'n',
+			   regmap_volatile(map, i) ? 'y' : 'n',
+			   regmap_precious(map, i) ? 'y' : 'n');
 	}
 
-	ret = buf_pos;
+	return 0;
+}
 
-	if (copy_to_user(user_buf, buf, buf_pos)) {
-		ret = -EFAULT;
-		goto out;
-	}
-
-	*ppos += buf_pos;
-
-out:
-	kfree(buf);
-	return ret;
+static int access_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, regmap_access_show, inode->i_private);
 }
 
 static const struct file_operations regmap_access_fops = {
-	.open = simple_open,
-	.read = regmap_access_read_file,
-	.llseek = default_llseek,
+	.open		= access_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
 };
 
 static ssize_t regmap_cache_only_write_file(struct file *file,
@@ -595,7 +638,7 @@ void regmap_debugfs_init(struct regmap *map, const char *name)
 	if (map->max_register || regmap_readable(map, 0)) {
 		umode_t registers_mode;
 
-#if defined(REGMAP_ALLOW_WRITE_DEBUGFS)
+#ifdef CONFIG_REGMAP_ALLOW_WRITE_DEBUGFS
 		registers_mode = 0600;
 #else
 		registers_mode = 0400;
@@ -603,6 +646,15 @@ void regmap_debugfs_init(struct regmap *map, const char *name)
 
 		debugfs_create_file("registers", registers_mode, map->debugfs,
 				    map, &regmap_map_fops);
+
+		debugfs_create_x32("address", 0600, map->debugfs,
+				    &map->dump_address);
+		map->dump_count = 1;
+		debugfs_create_u32("count", 0600, map->debugfs,
+				    &map->dump_count);
+		debugfs_create_file("data", registers_mode, map->debugfs,
+				    map, &regmap_data_fops);
+
 		debugfs_create_file("access", 0400, map->debugfs,
 				    map, &regmap_access_fops);
 	}

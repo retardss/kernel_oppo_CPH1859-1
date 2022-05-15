@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include "sched.h"
 #include "walt.h"
 
@@ -26,7 +27,7 @@ check_preempt_curr_stop(struct rq *rq, struct task_struct *p, int flags)
 }
 
 static struct task_struct *
-pick_next_task_stop(struct rq *rq, struct task_struct *prev)
+pick_next_task_stop(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
 	struct task_struct *stop = rq->stop;
 
@@ -138,4 +139,7 @@ const struct sched_class stop_sched_class = {
 	.prio_changed		= prio_changed_stop,
 	.switched_to		= switched_to_stop,
 	.update_curr		= update_curr_stop,
+#ifdef CONFIG_SCHED_WALT
+	.fixup_walt_sched_stats	= fixup_walt_sched_stats_common,
+#endif
 };

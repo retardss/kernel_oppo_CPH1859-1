@@ -86,7 +86,7 @@ static inline u32 ehci_read(void __iomem *base, u32 reg)
 
 static struct hc_driver __read_mostly ehci_omap_hc_driver;
 
-static const struct ehci_driver_overrides ehci_omap_overrides __initdata = {
+static const struct ehci_driver_overrides ehci_omap_overrides __initconst = {
 	.extra_priv_size = sizeof(struct omap_hcd),
 };
 
@@ -237,6 +237,7 @@ static int ehci_hcd_omap_probe(struct platform_device *pdev)
 
 err_pm_runtime:
 	pm_runtime_put_sync(dev);
+	pm_runtime_disable(dev);
 
 err_phy:
 	for (i = 0; i < omap->nports; i++) {

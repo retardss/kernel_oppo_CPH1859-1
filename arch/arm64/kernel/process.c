@@ -24,6 +24,9 @@
 #include <linux/efi.h>
 #include <linux/export.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
@@ -45,9 +48,7 @@
 #include <linux/personality.h>
 #include <linux/notifier.h>
 #include <trace/events/power.h>
-#ifdef CONFIG_THREAD_INFO_IN_TASK
 #include <linux/percpu.h>
-#endif
 
 #include <asm/alternative.h>
 #include <asm/compat.h>
@@ -85,6 +86,16 @@ void arch_cpu_idle(void)
 	cpu_do_idle();
 	local_irq_enable();
 	trace_cpu_idle_rcuidle(PWR_EVENT_EXIT, smp_processor_id());
+}
+
+void arch_cpu_idle_enter(void)
+{
+	idle_notifier_call_chain(IDLE_START);
+}
+
+void arch_cpu_idle_exit(void)
+{
+	idle_notifier_call_chain(IDLE_END);
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
@@ -187,7 +198,7 @@ static void show_data(unsigned long addr, int nbytes, const char *name)
 	 * don't attempt to dump non-kernel addresses or
 	 * values that are probably just small negative numbers
 	 */
-	if (!pfn_valid(__pa(addr) >> PAGE_SHIFT) || addr > -256UL)
+	if (addr < KIMAGE_VADDR || addr > -256UL)
 		return;
 
 	printk("\n%s: %#lx:\n", name, addr);
@@ -210,31 +221,25 @@ static void show_data(unsigned long addr, int nbytes, const char *name)
 		for (j = 0; j < 8; j++) {
 			u32	data;
 			if (probe_kernel_address(p, data)) {
-				printk(" ********");
+				pr_cont(" ********");
 			} else {
-				printk(" %08x", data);
+				pr_cont(" %08x", data);
 			}
 			++p;
 		}
-		printk("\n");
+		pr_cont("\n");
 	}
 }
 
 static void show_extra_register_data(struct pt_regs *regs, int nbytes)
 {
 	mm_segment_t fs;
-	unsigned int i;
 
 	fs = get_fs();
 	set_fs(KERNEL_DS);
 	show_data(regs->pc - nbytes, nbytes * 2, "PC");
 	show_data(regs->regs[30] - nbytes, nbytes * 2, "LR");
 	show_data(regs->sp - nbytes, nbytes * 2, "SP");
-	for (i = 0; i < 30; i++) {
-		char name[4];
-		snprintf(name, sizeof(name), "X%u", i);
-		show_data(regs->regs[i] - nbytes, nbytes * 2, name);
-	}
 	set_fs(fs);
 }
 
@@ -254,30 +259,37 @@ void __show_regs(struct pt_regs *regs)
 	}
 
 	show_regs_print_info(KERN_DEFAULT);
-	print_symbol("PC is at %s\n", instruction_pointer(regs));
-	print_symbol("LR is at %s\n", lr);
-	printk("pc : [<%016llx>] lr : [<%016llx>] pstate: %08llx\n",
-	       regs->pc, lr, regs->pstate);
-	printk("sp : %016llx\n", sp);
-	for (i = top_reg; i >= 0; i--) {
+	print_symbol("pc : %s\n", regs->pc);
+	print_symbol("lr : %s\n", lr);
+	printk("sp : %016llx pstate : %08llx\n", sp, regs->pstate);
+
+	i = top_reg;
+
+	while (i >= 0) {
 		printk("x%-2d: %016llx ", i, regs->regs[i]);
-		if (i % 2 == 0)
-			printk("\n");
+		i--;
+
+		if (i % 2 == 0) {
+			pr_cont("x%-2d: %016llx ", i, regs->regs[i]);
+			i--;
+		}
+
+		pr_cont("\n");
 	}
 	if (!user_mode(regs))
-		show_extra_register_data(regs, 128);
+		show_extra_register_data(regs, 64);
 	printk("\n");
 }
 
 void show_regs(struct pt_regs * regs)
 {
-	printk("\n");
 	__show_regs(regs);
+	dump_backtrace(regs, NULL);
 }
 
 static void tls_thread_flush(void)
 {
-	asm ("msr tpidr_el0, xzr");
+	write_sysreg(0, tpidr_el0);
 
 	if (is_compat_task()) {
 		current->thread.tp_value = 0;
@@ -288,7 +300,7 @@ static void tls_thread_flush(void)
 		 * with a stale shadow state during context switch.
 		 */
 		barrier();
-		asm ("msr tpidrro_el0, xzr");
+		write_sysreg(0, tpidrro_el0);
 	}
 }
 
@@ -337,14 +349,11 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 		 * Read the current TLS pointer from tpidr_el0 as it may be
 		 * out-of-sync with the saved value.
 		 */
-		asm("mrs %0, tpidr_el0" : "=r" (*task_user_tls(p)));
+		*task_user_tls(p) = read_sysreg(tpidr_el0);
 
 		if (stack_start) {
 			if (is_compat_thread(task_thread_info(p)))
 				childregs->compat_sp = stack_start;
-			/* 16-byte aligned stack mandatory on AArch64 */
-			else if (stack_start & 15)
-				return -EINVAL;
 			else
 				childregs->sp = stack_start;
 		}
@@ -359,8 +368,12 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 		memset(childregs, 0, sizeof(struct pt_regs));
 		childregs->pstate = PSR_MODE_EL1h;
 		if (IS_ENABLED(CONFIG_ARM64_UAO) &&
-		    cpus_have_cap(ARM64_HAS_UAO))
+		    cpus_have_const_cap(ARM64_HAS_UAO))
 			childregs->pstate |= PSR_UAO_BIT;
+
+		if (arm64_get_ssbd_state() == ARM64_SSBD_FORCE_DISABLE)
+			set_ssbs_bit(childregs);
+
 		p->thread.cpu_context.x19 = stack_start;
 		p->thread.cpu_context.x20 = stk_sz;
 	}
@@ -372,12 +385,14 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 	return 0;
 }
 
+void tls_preserve_current_state(void)
+{
+	*task_user_tls(current) = read_sysreg(tpidr_el0);
+}
+
 static void tls_thread_switch(struct task_struct *next)
 {
-	unsigned long tpidr;
-
-	asm("mrs %0, tpidr_el0" : "=r" (tpidr));
-	*task_user_tls(current) = tpidr;
+	tls_preserve_current_state();
 
 	if (is_compat_thread(task_thread_info(next)))
 		write_sysreg(next->thread.tp_value, tpidrro_el0);
@@ -385,6 +400,64 @@ static void tls_thread_switch(struct task_struct *next)
 		write_sysreg(0, tpidrro_el0);
 
 	write_sysreg(*task_user_tls(next), tpidr_el0);
+}
+
+/* Restore the UAO state depending on next's addr_limit */
+void uao_thread_switch(struct task_struct *next)
+{
+	if (IS_ENABLED(CONFIG_ARM64_UAO)) {
+		if (task_thread_info(next)->addr_limit == KERNEL_DS)
+			asm(ALTERNATIVE("nop", SET_PSTATE_UAO(1), ARM64_HAS_UAO));
+		else
+			asm(ALTERNATIVE("nop", SET_PSTATE_UAO(0), ARM64_HAS_UAO));
+	}
+}
+
+/*
+ * Force SSBS state on context-switch, since it may be lost after migrating
+ * from a CPU which treats the bit as RES0 in a heterogeneous system.
+ */
+static void ssbs_thread_switch(struct task_struct *next)
+{
+	struct pt_regs *regs = task_pt_regs(next);
+
+	/*
+	 * Nothing to do for kernel threads, but 'regs' may be junk
+	 * (e.g. idle task) so check the flags and bail early.
+	 */
+	if (unlikely(next->flags & PF_KTHREAD))
+		return;
+
+	/*
+	 * If all CPUs implement the SSBS extension, then we just need to
+	 * context-switch the PSTATE field.
+	 */
+	if (cpu_have_feature(cpu_feature(SSBS)))
+		return;
+
+	/* If the mitigation is enabled, then we leave SSBS clear. */
+	if ((arm64_get_ssbd_state() == ARM64_SSBD_FORCE_ENABLE) ||
+	    test_tsk_thread_flag(next, TIF_SSBD))
+		return;
+
+	if (compat_user_mode(regs))
+		set_compat_ssbs_bit(regs);
+	else if (user_mode(regs))
+		set_ssbs_bit(regs);
+}
+
+/*
+ * We store our current task in sp_el0, which is clobbered by userspace. Keep a
+ * shadow copy so that we can restore this upon entry from userspace.
+ *
+ * This is *only* for exception entry from EL0, and is not valid until we
+ * __switch_to() a user task.
+ */
+DEFINE_PER_CPU(struct task_struct *, __entry_task);
+
+static void entry_task_switch(struct task_struct *next)
+{
+	__this_cpu_write(__entry_task, next);
 }
 
 /* Restore the UAO state depending on next's addr_limit */
@@ -419,7 +492,7 @@ static void entry_task_switch(struct task_struct *next)
 /*
  * Thread switching.
  */
-struct task_struct *__switch_to(struct task_struct *prev,
+__notrace_funcgraph struct task_struct *__switch_to(struct task_struct *prev,
 				struct task_struct *next)
 {
 	struct task_struct *last;
@@ -428,14 +501,15 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	tls_thread_switch(next);
 	hw_breakpoint_thread_switch(next);
 	contextidr_thread_switch(next);
-#ifdef CONFIG_THREAD_INFO_IN_TASK
 	entry_task_switch(next);
-#endif
 	uao_thread_switch(next);
+	ssbs_thread_switch(next);
 
 	/*
 	 * Complete any pending TLB or cache maintenance on this CPU in case
 	 * the thread migrates to a different CPU.
+	 * This full barrier is also required by the membarrier system
+	 * call.
 	 */
 	dsb(ish);
 
@@ -458,15 +532,12 @@ unsigned long get_wchan(struct task_struct *p)
 		return 0;
 
 	frame.fp = thread_saved_fp(p);
-	frame.sp = thread_saved_sp(p);
 	frame.pc = thread_saved_pc(p);
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
 	frame.graph = p->curr_ret_stack;
 #endif
 	do {
-		if (frame.sp < stack_page ||
-		    frame.sp >= stack_page + THREAD_SIZE ||
-		    unwind_frame(p, &frame))
+		if (unwind_frame(p, &frame))
 			goto out;
 		if (!in_sched_functions(frame.pc)) {
 			ret = frame.pc;
@@ -486,13 +557,18 @@ unsigned long arch_align_stack(unsigned long sp)
 	return sp & ~0xf;
 }
 
-static unsigned long randomize_base(unsigned long base)
-{
-	unsigned long range_end = base + (STACK_RND_MASK << PAGE_SHIFT) + 1;
-	return randomize_range(base, range_end, 0) ? : base;
-}
-
 unsigned long arch_randomize_brk(struct mm_struct *mm)
 {
-	return randomize_base(mm->brk);
+	if (is_compat_task())
+		return randomize_page(mm->brk, SZ_32M);
+	else
+		return randomize_page(mm->brk, SZ_1G);
+}
+
+/*
+ * Called from setup_new_exec() after (COMPAT_)SET_PERSONALITY.
+ */
+void arch_setup_new_exec(void)
+{
+	current->mm->context.flags = is_compat_task() ? MMCF_AARCH32 : 0;
 }

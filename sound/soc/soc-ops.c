@@ -77,7 +77,7 @@ int snd_soc_get_enum_double(struct snd_kcontrol *kcontrol,
 	item = snd_soc_enum_val_to_item(e, val);
 	ucontrol->value.enumerated.item[0] = item;
 	if (e->shift_l != e->shift_r) {
-		val = (reg_val >> e->shift_l) & e->mask;
+		val = (reg_val >> e->shift_r) & e->mask;
 		item = snd_soc_enum_val_to_item(e, val);
 		ucontrol->value.enumerated.item[1] = item;
 	}
@@ -120,7 +120,7 @@ int snd_soc_put_enum_double(struct snd_kcontrol *kcontrol,
 EXPORT_SYMBOL_GPL(snd_soc_put_enum_double);
 
 /**
- * snd_soc_read_signed - Read a codec register and interprete as signed value
+ * snd_soc_read_signed - Read a codec register and interpret as signed value
  * @component: component
  * @reg: Register to read
  * @mask: Mask to use after shifting the register value
@@ -201,7 +201,10 @@ int snd_soc_info_volsw(struct snd_kcontrol *kcontrol,
 
 	uinfo->count = snd_soc_volsw_is_stereo(mc) ? 2 : 1;
 	uinfo->value.integer.min = 0;
-	uinfo->value.integer.max = platform_max - mc->min;
+	if (uinfo->type == SNDRV_CTL_ELEM_TYPE_INTEGER)
+		uinfo->value.integer.max = platform_max - mc->min;
+	else
+		uinfo->value.integer.max = platform_max;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(snd_soc_info_volsw);
@@ -221,14 +224,12 @@ EXPORT_SYMBOL_GPL(snd_soc_info_volsw);
 int snd_soc_info_volsw_sx(struct snd_kcontrol *kcontrol,
 			  struct snd_ctl_elem_info *uinfo)
 {
-	struct soc_mixer_control *mc =
-		(struct soc_mixer_control *)kcontrol->private_value;
-
 	snd_soc_info_volsw(kcontrol, uinfo);
 	/* Max represents the number of levels in an SX control not the
-	 * maximum value, so add the minimum value back on
+	 * maximum value.
+	 * uinfo->value.integer.max is set to number of levels
+	 * in snd_soc_info_volsw. No further adjustment is necessary.
 	 */
-	uinfo->value.integer.max += mc->min;
 
 	return 0;
 }
@@ -378,7 +379,7 @@ int snd_soc_get_volsw_sx(struct snd_kcontrol *kcontrol,
 	unsigned int rshift = mc->rshift;
 	int max = mc->max;
 	int min = mc->min;
-	int mask = (1 << (fls(min + max) - 1)) - 1;
+	unsigned int mask = (1U << (fls(min + max) - 1)) - 1;
 	unsigned int val;
 	int ret;
 
@@ -423,7 +424,7 @@ int snd_soc_put_volsw_sx(struct snd_kcontrol *kcontrol,
 	unsigned int rshift = mc->rshift;
 	int max = mc->max;
 	int min = mc->min;
-	int mask = (1 << (fls(min + max) - 1)) - 1;
+	unsigned int mask = (1U << (fls(min + max) - 1)) - 1;
 	int err = 0;
 	unsigned int val, val_mask, val2 = 0;
 
@@ -779,11 +780,11 @@ int snd_soc_bytes_tlv_callback(struct snd_kcontrol *kcontrol, int op_flag,
 	switch (op_flag) {
 	case SNDRV_CTL_TLV_OP_READ:
 		if (params->get)
-			ret = params->get(tlv, count);
+			ret = params->get(kcontrol, tlv, count);
 		break;
 	case SNDRV_CTL_TLV_OP_WRITE:
 		if (params->put)
-			ret = params->put(tlv, count);
+			ret = params->put(kcontrol, tlv, count);
 		break;
 	}
 	return ret;
@@ -837,7 +838,7 @@ int snd_soc_get_xr_sx(struct snd_kcontrol *kcontrol,
 	unsigned int regbase = mc->regbase;
 	unsigned int regcount = mc->regcount;
 	unsigned int regwshift = component->val_bytes * BITS_PER_BYTE;
-	unsigned int regwmask = (1<<regwshift)-1;
+	unsigned int regwmask = (1UL<<regwshift)-1;
 	unsigned int invert = mc->invert;
 	unsigned long mask = (1UL<<mc->nbits)-1;
 	long min = mc->min;
@@ -886,7 +887,7 @@ int snd_soc_put_xr_sx(struct snd_kcontrol *kcontrol,
 	unsigned int regbase = mc->regbase;
 	unsigned int regcount = mc->regcount;
 	unsigned int regwshift = component->val_bytes * BITS_PER_BYTE;
-	unsigned int regwmask = (1<<regwshift)-1;
+	unsigned int regwmask = (1UL<<regwshift)-1;
 	unsigned int invert = mc->invert;
 	unsigned long mask = (1UL<<mc->nbits)-1;
 	long max = mc->max;
